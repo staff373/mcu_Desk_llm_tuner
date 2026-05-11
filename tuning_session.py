@@ -532,7 +532,10 @@ class TuningSession:
         self.session_id = f"{self.plan.get('plan_name', 'mcu_tuning')}_{now_stamp()}"
         self.state = self.STATE_IDLE
         self.current_parameter_key: str | None = None
+        self.current_round_index: int | None = None
         self.baseline_parameters: dict[str, float] | None = None
+        self.skipped_parameter_keys: set[str] = set()
+        self.skipped_parameters: list[dict[str, Any]] = []
 
         self.parameters = {param["key"]: dict(param) for param in plan["parameters"]}
         self.current = {key: float(param["current"]) for key, param in self.parameters.items()}
@@ -786,19 +789,53 @@ class TuningSession:
             data={"previous_state": paused_state},
         )
 
-    def skip_current_param(self) -> ActionResult:
+    def _skip_reason_for(self, key: str) -> str:
+        for record in self.skipped_parameters:
+            if record["key"] == key:
+                return str(record["reason"])
+        return "operator_skip"
+
+    def skip_current_param(self, reason: str = "operator_skip") -> ActionResult:
         if self.current_parameter_key is None:
             return self._reject_action(
                 "skip_current_param",
                 "no_active_parameter",
                 "Cannot skip because no current parameter is active.",
             )
-        return self._reject_action(
-            "skip_current_param",
-            "skip_not_available",
-            "Skipping the active parameter is not available until skip control is implemented.",
-            key=self.current_parameter_key,
+        key = self.current_parameter_key
+        already_skipped = key in self.skipped_parameter_keys
+        self.skipped_parameter_keys.add(key)
+        if not already_skipped:
+            record: dict[str, Any] = {
+                "key": key,
+                "reason": reason,
+                "state": self.state,
+            }
+            if self.current_round_index is not None:
+                record["round"] = self.current_round_index
+            self.skipped_parameters.append(record)
+        result = ActionResult(
+            ok=True,
+            action="skip_current_param",
+            state=self.state,
+            message=f"Skip requested for {key}.",
+            data={
+                "key": key,
+                "reason": reason,
+                "already_skipped": already_skipped,
+            },
         )
+        self.emit(
+            "action",
+            result.message,
+            action="skip_current_param",
+            state=self.state,
+            session_id=self.session_id,
+            key=key,
+            reason=reason,
+            already_skipped=already_skipped,
+        )
+        return result
 
     def rollback_to(self, target: str) -> ActionResult:
         if target not in {"last_stable", "baseline"}:
@@ -1046,33 +1083,73 @@ class TuningSession:
                 if self.stop_requested:
                     self._apply_stop_reason("manual_stop")
                     raise StopRequested()
-                parameter_order = step_policy["parameter_order"]
+                parameter_order = list(step_policy["parameter_order"])
                 for round_index in range(1, int(step_policy["max_rounds"]) + 1):
                     self._wait_if_paused()
                     if self.stop_requested:
                         self._apply_stop_reason("manual_stop")
                         break
 
-                    key = parameter_order[(round_index - 1) % len(parameter_order)]
+                    available_parameter_order = [
+                        key for key in parameter_order if key not in self.skipped_parameter_keys
+                    ]
+                    if not available_parameter_order:
+                        self.stop_reason = "all_parameters_skipped"
+                        self.emit(
+                            "info",
+                            "All parameters have been skipped; stopping tuning.",
+                            skipped_parameter_keys=sorted(self.skipped_parameter_keys),
+                        )
+                        break
+
+                    key = available_parameter_order[(round_index - 1) % len(available_parameter_order)]
                     self.current_parameter_key = key
+                    self.current_round_index = round_index
                     param = self.parameters[key]
                     step = min(self.steps[key], float(param["max_delta_per_round"]))
                     trial_value = build_trial_value(self.current[key], step, self.directions[key], param)
                     if trial_value is None:
                         self.emit("round", f"Round {round_index}: skip {key}, no in-range trial value remains", round=round_index, key=key)
                         self.current_parameter_key = None
+                        self.current_round_index = None
                         continue
 
                     self.emit("round", f"Round {round_index}: {key} -> {trial_value:g}", round=round_index, key=key, trial_value=trial_value)
                     self._wait_if_paused()
+                    if key in self.skipped_parameter_keys:
+                        skip_reason = self._skip_reason_for(key)
+                        self.current_parameter_key = None
+                        self.current_round_index = None
+                        self.emit(
+                            "round",
+                            f"Round {round_index}: skipped {key} ({skip_reason})",
+                            round=round_index,
+                            key=key,
+                            skipped=True,
+                            reason=skip_reason,
+                        )
+                        record = {
+                            "round": round_index,
+                            "changed_parameter": key,
+                            "before_params": dict(self.current),
+                            "trial_params": dict(self.current),
+                            "decision": "skipped",
+                            "skip_reason": skip_reason,
+                            "skipped": True,
+                        }
+                        log_record(log_path, record)
+                        self.emit("record", "", record=record)
+                        continue
                     if self.stop_requested:
                         self.current_parameter_key = None
+                        self.current_round_index = None
                         self._apply_stop_reason("manual_stop")
                         break
 
                     before_params = dict(self.current)
                     trial = self.run_trial(ser, param, trial_value, self.baseline_score)
                     self.current_parameter_key = None
+                    self.current_round_index = None
                     if self.stop_requested:
                         self._apply_stop_reason("manual_stop")
                         break
@@ -1176,7 +1253,7 @@ class TuningSession:
         summary = self.summary()
         log_record(log_path, {"summary": summary})
         self.emit("summary", "", summary=summary)
-        exit_code = 0 if self.stop_reason in {"max_rounds", "user_interrupt", "manual_stop", "operator_abort"} else 1
+        exit_code = 0 if self.stop_reason in {"max_rounds", "user_interrupt", "manual_stop", "operator_abort", "all_parameters_skipped"} else 1
         terminal_state = self.STATE_STOPPED if exit_code == 0 else self.STATE_ERROR
         terminal_reason = "run_completed" if exit_code == 0 else "run_failed"
         self._set_state(terminal_state, terminal_reason)
@@ -1192,6 +1269,8 @@ class TuningSession:
             "held": self.held,
             "failed": self.failed,
             "rolled_back": self.rolled_back,
+            "skipped_parameters": self.skipped_parameters,
+            "skipped_parameter_keys": sorted(self.skipped_parameter_keys),
             "stop_reason": self.stop_reason,
             "stop_command_results": self.stop_command_results,
             "log_path": str(self.log_path) if self.log_path is not None else None,

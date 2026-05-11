@@ -87,3 +87,16 @@ Started: 2026-05-11 12:00:00
   - Active-run emergency stop can be tested from the structured `connected` state event and should send only `TEL_OFF`, then `STOP` from YAML.
   - GUI controls can call `self.session.emergency_stop()` when future direct-session worker support is present while preserving current subprocess compatibility.
 ---
+
+## 2026-05-11 12:54:32 - US-007
+- Implemented `skip_current_param(reason=...)` as a structured control action that marks only the active parameter as skipped and emits key/reason metadata.
+- The tuning loop now filters session-scoped skipped keys without mutating the source plan, records skipped rounds in JSONL, and includes skipped parameters in final summary output.
+- Files changed: `tuning_session.py`, `test_tuning_session_skip_current_parameter.py`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`, `project_status.md`, `.project_checkpoints/US-007/20260511-125221/`.
+- Verification commands and results: `python -m py_compile tuning_session.py test_tuning_session_skip_current_parameter.py test_tuning_session_invalid_controls.py` passed; `python -m unittest test_tuning_session_skip_current_parameter.py test_tuning_session_invalid_controls.py` passed with 4 tests; full session unittest set passed with 17 tests; full edited session test compile set passed.
+- Checkpoint path: `.project_checkpoints/US-007/20260511-125221/`
+- Real serial status: not opened
+- Learnings for future iterations:
+  - Skip control can be tested by calling `skip_current_param(...)` from the structured `round` event before the YAML `SET` command is sent.
+  - Skipped parameter data is session-scoped in `skipped_parameter_keys` and `skipped_parameters`; it is emitted through summary JSONL records for later report/export work.
+  - A deepcopy comparison of the input plan is a lightweight guard that session controls do not mutate source YAML-derived structures.
+---

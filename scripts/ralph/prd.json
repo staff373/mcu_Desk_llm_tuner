@@ -112,7 +112,7 @@
         "Tests pass for skip during tuning and rejected skip outside tuning."
       ],
       "priority": 7,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
