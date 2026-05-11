@@ -272,7 +272,7 @@
         "Tests pass: the probe exits 0 in a no-hardware environment and writes its artifacts."
       ],
       "priority": 17,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

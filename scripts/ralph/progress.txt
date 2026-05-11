@@ -20,6 +20,7 @@ Started: 2026-05-11 12:00:00
 - Virtual no-hardware flows should inject `VirtualTransport` through `TuningSession.transport_factory`; it is opt-in and never selected by port name or CLI defaults.
 - Virtual scoring targets can be declared per test-only fixture parameter with `virtual_target`; `VirtualTransport` falls back to `current` when no target is declared.
 - Agent-facing no-hardware controls live in `agent_console_probe.py`; inject `VirtualTransport` through `AgentControlFacade(transport_factory_provider=...)` and patch `tuning_session.serial.Serial` to assert no real serial port opens.
+- The standalone agent probe CLI is `python agent_console_probe.py`; it uses `run_probe(...)`, blocks `serial.Serial`, validates required action/event coverage, and supports `--require-event` for missing-event negative tests.
 
 ## 2026-05-11 12:14:10 - US-001
 - Implemented stable `TuningSessionState` values and readable `TuningSession.state`, initialized to `idle` without opening serial.
@@ -220,4 +221,18 @@ Started: 2026-05-11 12:00:00
   - Keep the facade public method set narrow; do not add arbitrary serial send/write helpers.
   - Facade event forwarding can safely invoke session controls from structured event callbacks when virtual transport is injected.
   - `export_session_report` currently provides a lightweight JSON report for the facade; US-018 can harden the schema and report content.
+---
+
+## 2026-05-11 14:21:24 - US-017
+- Implemented the standalone no-hardware agent probe CLI in `agent_console_probe.py`, using the virtual fixture to load, validate, start auto-tune, trigger rollback/pause/skip/resume, stop, and export a report.
+- Added probe summary validation for required actions, structured event types, artifact existence, virtual transport closure, and empty `serial_open_attempts`.
+- Added CLI tests covering successful artifact creation and non-zero exit when a required structured event is missing.
+- Files changed: `agent_console_probe.py`, `test_agent_console_probe_cli.py`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`, `project_status.md`, `.project_checkpoints/US-017/20260511-141700/`.
+- Verification commands and results: `python -m py_compile agent_console_probe.py tuning_session.py validate_plan.py test_agent_console_probe_cli.py test_agent_control_facade.py` passed; `python -m unittest test_agent_console_probe_cli.py test_agent_control_facade.py` passed with 5 tests; `python validate_plan.py .\fixtures\virtual_mcu_tuning_plan.yaml` passed with `RESULT: valid`; `python agent_console_probe.py --log-dir .project_checkpoints\US-017\20260511-141700\probe_artifacts --summary .project_checkpoints\US-017\20260511-141700\probe_artifacts\summary.json --report .project_checkpoints\US-017\20260511-141700\probe_artifacts\report.json` exited 0.
+- Checkpoint path: `.project_checkpoints/US-017/20260511-141700/`
+- Real serial status: not opened
+- Learnings for future iterations:
+  - The probe CLI should remain a thin wrapper over `AgentControlFacade`; keep arbitrary serial write/send helpers out of this surface.
+  - `--require-event` is the negative-test hook for proving the CLI exits non-zero when required structured events are missing.
+  - Probe artifacts include `report.json`, `summary.json`, and the session JSONL under the chosen `--log-dir`.
 ---
