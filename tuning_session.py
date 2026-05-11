@@ -64,6 +64,32 @@ class ExecutionError(RuntimeError):
     pass
 
 
+class TuningSessionState:
+    IDLE = "idle"
+    VALIDATING = "validating"
+    CONNECTED = "connected"
+    BASELINE = "baseline"
+    TUNING = "tuning"
+    PAUSED = "paused"
+    ROLLBACK = "rollback"
+    STOPPING = "stopping"
+    STOPPED = "stopped"
+    ERROR = "error"
+
+    VALUES = (
+        IDLE,
+        VALIDATING,
+        CONNECTED,
+        BASELINE,
+        TUNING,
+        PAUSED,
+        ROLLBACK,
+        STOPPING,
+        STOPPED,
+        ERROR,
+    )
+
+
 class ConsoleEventRenderer:
     def __init__(self, show_serial: bool = True) -> None:
         self.show_serial = show_serial
@@ -443,6 +469,18 @@ def log_record(log_path: Path, record: dict[str, Any]) -> None:
 
 
 class TuningSession:
+    STATE_IDLE = TuningSessionState.IDLE
+    STATE_VALIDATING = TuningSessionState.VALIDATING
+    STATE_CONNECTED = TuningSessionState.CONNECTED
+    STATE_BASELINE = TuningSessionState.BASELINE
+    STATE_TUNING = TuningSessionState.TUNING
+    STATE_PAUSED = TuningSessionState.PAUSED
+    STATE_ROLLBACK = TuningSessionState.ROLLBACK
+    STATE_STOPPING = TuningSessionState.STOPPING
+    STATE_STOPPED = TuningSessionState.STOPPED
+    STATE_ERROR = TuningSessionState.ERROR
+    STATE_VALUES = TuningSessionState.VALUES
+
     def __init__(
         self,
         plan: dict[str, Any],
@@ -456,6 +494,7 @@ class TuningSession:
         self.event_handler = event_handler
         self.stop_requested = False
         self.pause_requested = False
+        self.state = self.STATE_IDLE
 
         self.parameters = {param["key"]: dict(param) for param in plan["parameters"]}
         self.current = {key: float(param["current"]) for key, param in self.parameters.items()}
@@ -472,6 +511,11 @@ class TuningSession:
         self.final_score: float | None = None
         self.log_path: Path | None = None
 
+    def _set_state(self, state: str) -> None:
+        if state not in self.STATE_VALUES:
+            raise ValueError(f"unknown tuning session state: {state}")
+        self.state = state
+
     def emit(self, event_type: str, message: str = "", **data: Any) -> None:
         emit_event(self.event_handler, event_type, message, **data)
 
@@ -485,8 +529,13 @@ class TuningSession:
         self.pause_requested = False
 
     def _wait_if_paused(self) -> None:
+        previous_state = self.state
+        if self.pause_requested and not self.stop_requested:
+            self._set_state(self.STATE_PAUSED)
         while self.pause_requested and not self.stop_requested:
             time.sleep(0.05)
+        if self.state == self.STATE_PAUSED:
+            self._set_state(previous_state)
 
     def _prepare_log_path(self) -> Path:
         log_dir = self.log_dir
@@ -611,6 +660,7 @@ class TuningSession:
         return TrialResult(decision, score, improvement, hard_failures, telemetry)
 
     def run(self) -> int:
+        self._set_state(self.STATE_VALIDATING)
         transport = self.plan["transport"]
         commands = self.plan["commands"]
         scoring = self.plan["scoring"]
@@ -620,6 +670,7 @@ class TuningSession:
         self.emit("info", f"Opening serial port {transport['port']} @ {transport['baudrate']}...")
 
         with serial.Serial(**serial_kwargs(transport)) as ser:
+            self._set_state(self.STATE_CONNECTED)
             status = send_command(
                 ser,
                 commands["status"],
@@ -631,6 +682,7 @@ class TuningSession:
                 event_handler=self.event_handler,
             )
             if not status.ok:
+                self._set_state(self.STATE_ERROR)
                 raise ExecutionError(status.error or "initial STATUS failed")
 
             if commands.get("telemetry_on"):
@@ -645,13 +697,16 @@ class TuningSession:
                     event_handler=self.event_handler,
                 )
                 if not start.ok:
+                    self._set_state(self.STATE_ERROR)
                     raise ExecutionError(start.error or "telemetry_on failed")
 
             try:
+                self._set_state(self.STATE_BASELINE)
                 self.emit("info", f"Collecting baseline for {scoring['baseline_window_ms']} ms...")
                 baseline_telemetry = collect_telemetry(ser, self.plan, int(scoring["baseline_window_ms"]), self.event_handler)
                 self.baseline_score, baseline_failures = score_window(self.plan, baseline_telemetry)
                 if self.baseline_score is None:
+                    self._set_state(self.STATE_ERROR)
                     raise ExecutionError(f"baseline failed: {', '.join(baseline_failures)}")
                 self.final_score = self.baseline_score
                 self.emit(
@@ -664,6 +719,7 @@ class TuningSession:
                     },
                 )
 
+                self._set_state(self.STATE_TUNING)
                 parameter_order = step_policy["parameter_order"]
                 for round_index in range(1, int(step_policy["max_rounds"]) + 1):
                     self._wait_if_paused()
@@ -698,7 +754,10 @@ class TuningSession:
                         self.emit("decision", message, decision="accept", score=trial.score, improvement=trial.improvement, key=key)
                     elif trial.decision == "hold":
                         self.held += 1
+                        previous_state = self.state
+                        self._set_state(self.STATE_ROLLBACK)
                         rollback = self.execute_rollback(ser, key, self.last_stable[key])
+                        self._set_state(previous_state)
                         rollback_status = "ok" if rollback.ok else f"failed:{rollback.error}"
                         self.steps[key] *= float(step_policy["shrink_on_failure"])
                         self.directions[key] *= -1
@@ -710,7 +769,10 @@ class TuningSession:
                         self.emit("decision", message, decision="hold", score=trial.score, improvement=trial.improvement, key=key)
                     else:
                         self.failed += 1
+                        previous_state = self.state
+                        self._set_state(self.STATE_ROLLBACK)
                         rollback = self.execute_rollback(ser, key, self.last_stable[key])
+                        self._set_state(previous_state)
                         self.rolled_back += 1
                         rollback_status = "ok" if rollback.ok else f"failed:{rollback.error}"
                         self.steps[key] *= float(step_policy["shrink_on_failure"])
@@ -731,6 +793,7 @@ class TuningSession:
                         )
                         if not rollback.ok:
                             self.stop_reason = "rollback_failed"
+                            self._set_state(self.STATE_ERROR)
                             break
 
                     record = {
@@ -763,12 +826,16 @@ class TuningSession:
                 self.stop_reason = "user_interrupt"
                 self.emit("info", "User interrupt received; stopping and preserving last stable parameters.")
             finally:
+                if self.state != self.STATE_ERROR:
+                    self._set_state(self.STATE_STOPPING)
                 self.stop_device(ser)
 
         summary = self.summary()
         log_record(log_path, {"summary": summary})
         self.emit("summary", "", summary=summary)
-        return 0 if self.stop_reason in {"max_rounds", "user_interrupt", "manual_stop"} else 1
+        exit_code = 0 if self.stop_reason in {"max_rounds", "user_interrupt", "manual_stop"} else 1
+        self._set_state(self.STATE_STOPPED if exit_code == 0 else self.STATE_ERROR)
+        return exit_code
 
     def summary(self) -> dict[str, Any]:
         return {

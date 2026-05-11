@@ -84,7 +84,7 @@ Get-FileHash -Algorithm SHA256 "tuning_session.py" | Format-List | Out-File "$ro
 
 | ID | Scope | Status | Verification Floor | Checkpoint |
 | --- | --- | --- | --- | --- |
-| US-001 | Session state values | todo | Typecheck plus tests for initial, success, and failure terminal states | pending |
+| US-001 | Session state values | checkpointed | `python -m py_compile tuning_session.py test_tuning_session_state.py`; `python -m unittest test_tuning_session_state.py` passed | `.project_checkpoints/US-001/20260511-121400/` |
 | US-002 | State transition events | todo | Event field assertions and transition ordering tests | pending |
 | US-003 | Invalid control guardrails | todo | Negative tests for invalid session actions | pending |
 | US-004 | Pause and resume | todo | Virtual tests for pause before baseline, pause during tuning, resume | pending |
@@ -132,6 +132,7 @@ Get-FileHash -Algorithm SHA256 "tuning_session.py" | Format-List | Out-File "$ro
 | --- | --- | --- | --- | --- | --- | --- |
 | 2026-05-11 | STATUS-001 | checkpointed | `project_status.md` | File created and aligned with PRD story list | not required for status bootstrap | Establishes per-story checkpoint and rollback rules |
 | 2026-05-11 | STATUS-002 | verified | `AGENTS.md`, `.agents/skills/prd/SKILL.md`, `.agents/skills/ralph/SKILL.md`, `scripts/ralph/*`, `README.md`, `project_status.md` | Project-local Ralph workspace created; `scripts/ralph/prd.json` validated as JSON | not required for Ralph workspace migration | Aligns current project with the `medial_system_demo` local Ralph layout |
+| 2026-05-11 | US-001 | checkpointed | `tuning_session.py`, `test_tuning_session_state.py`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`, `project_status.md`, `.project_checkpoints/US-001/20260511-121400/` | `python -m py_compile tuning_session.py test_tuning_session_state.py` passed; `python -m unittest test_tuning_session_state.py` passed with 3 tests | `.project_checkpoints/US-001/20260511-121400/` | Added stable session states and no-hardware fake-serial tests; real serial status: not opened |
 
 ## Open Decisions
 

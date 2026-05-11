@@ -7,4 +7,16 @@ Started: 2026-05-11 12:00:00
 - Each Story must update `project_status.md`, create a checkpoint under `.project_checkpoints/`, commit, and push.
 - Current phase is no-hardware: do not open COM8 or any real serial port during default verification.
 - Real serial commands must come only from YAML or validated `TuningSession` control flow.
+- Early session-core tests can use root-level `unittest` files and patch `tuning_session.serial.Serial` with fakes to prove no real serial port is opened.
 
+## 2026-05-11 12:14:10 - US-001
+- Implemented stable `TuningSessionState` values and readable `TuningSession.state`, initialized to `idle` without opening serial.
+- Added run-state landing points for validating, connected, baseline, tuning, rollback, stopping, stopped, and error, with success ending in `stopped` and failure ending in `error`.
+- Files changed: `tuning_session.py`, `test_tuning_session_state.py`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`, `project_status.md`, `.project_checkpoints/US-001/20260511-121400/`.
+- Verification commands and results: `python -m py_compile tuning_session.py test_tuning_session_state.py` passed; `python -m unittest test_tuning_session_state.py` passed with 3 tests.
+- Checkpoint path: `.project_checkpoints/US-001/20260511-121400/`
+- Real serial status: not opened
+- Learnings for future iterations:
+  - No-hardware session tests can patch `tuning_session.serial.Serial` with a fake serial class and assert the fake opened only a virtual port.
+  - The current project has no existing test package; root-level `unittest` files are the lowest-friction verification path for early session-core stories.
+---
