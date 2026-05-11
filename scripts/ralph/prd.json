@@ -428,7 +428,7 @@
         "Tests pass: no-hardware verification exits successfully and writes a concise verification summary."
       ],
       "priority": 26,
-      "passes": false,
+      "passes": true,
       "notes": ""
     }
   ]

@@ -30,6 +30,7 @@ Started: 2026-05-11 12:00:00
 - GUI safety and YAML command preview surfaces live in `TuningPanel.safety_tree` and `TuningPanel.command_preview_tree`; structured `round` events preview YAML `commands.set` before TX, while `dat`, `decision`, and `error` events drive safety highlighting.
 - GUI direct-session runs write replay artifacts under the plan-adjacent `mcu_tuning_logs/`: `{session_id}.jsonl`, `{session_id}_plan_snapshot.yaml`, `{session_id}_summary.json`, `{session_id}_session.json`, and a session-id-prefixed transcript.
 - Session replay parsing is centralized in `tuning_panel.load_session_replay(...)`; it can load GUI manifests, agent session reports, summary JSON, and JSONL logs, with corrupt or partial logs surfaced as recoverable `load_errors`.
+- Full no-hardware regression verification is `python verify_no_hardware.py`; it compiles project Python files, validates the virtual fixture, checks CLI help, runs GUI self/hidden init with a serial-open guard, runs the virtual agent probe, runs executor skill quick_validate when available, and cleans generated caches/temp probe logs by default.
 
 ## 2026-05-11 12:14:10 - US-001
 - Implemented stable `TuningSessionState` values and readable `TuningSession.state`, initialized to `idle` without opening serial.
@@ -349,4 +350,17 @@ Started: 2026-05-11 12:00:00
   - Replay tests can drive a hidden `TuningPanel` with injected `VirtualTransport`, drain `SESSION_EVENT`/`SESSION_DONE` queue items manually, and assert saved replay artifacts without touching serial.
   - Agent report replay coverage should reuse `AgentControlFacade.export_session_report(...)` so GUI replay stays compatible with agent-generated session artifacts.
   - Partial JSONL logs should remain recoverable: parse valid records, record `load_errors`, and keep the UI usable for whatever metadata can still be reconstructed.
+---
+
+## 2026-05-11 16:13:48 - US-026
+- Implemented `verify_no_hardware.py`, a repeatable no-hardware regression gate for compile checks, virtual plan validation, CLI help checks, GUI startup checks, guarded hidden initialization, virtual agent probe, optional executor skill quick_validate, serial-open negative assertion, summary export, and cleanup.
+- Added `test_no_hardware_verification_harness.py` coverage for summary writing, temporary artifact cleanup, required step planning, and failure when the probe reports a real serial open attempt.
+- Files changed: `verify_no_hardware.py`, `test_no_hardware_verification_harness.py`, `README.md`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`, `project_status.md`, `.project_checkpoints/US-026/20260511-161053/`.
+- Verification commands and results: `python -m py_compile verify_no_hardware.py test_no_hardware_verification_harness.py` passed; `python -m unittest test_no_hardware_verification_harness.py` passed with 2 tests; `python verify_no_hardware.py --summary .project_checkpoints\US-026\20260511-161053\verification_summary.json --artifact-dir .project_checkpoints\US-026\20260511-161053\verification_artifacts --keep-artifacts` passed with `real_serial_status=not opened`; `python -m unittest discover -p "test_*.py"` passed with 72 tests.
+- Checkpoint path: `.project_checkpoints/US-026/20260511-161053/`
+- Real serial status: not opened
+- Learnings for future iterations:
+  - Use `python verify_no_hardware.py` as the full no-hardware gate before handoff or release checks.
+  - Pass `--summary`, `--artifact-dir`, and `--keep-artifacts` when checkpoint evidence must preserve probe summary/report/log files.
+  - The harness records quick_validate only when the global `mcu-bluetooth-executor` skill and validator script are present.
 ---

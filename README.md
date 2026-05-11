@@ -12,3 +12,13 @@
 - Ralph 进度记录放在 `scripts/ralph/progress.txt`。
 - Ralph 本地执行说明放在 `scripts/ralph/CODEX.md`。
 - 本项目使用项目内 Ralph 工作区，不使用根目录 `prd.json` 作为执行入口。
+
+## No-Hardware 回归验证
+
+运行完整离线验收门禁：
+
+```powershell
+python verify_no_hardware.py
+```
+
+该命令会执行 Python 编译、虚拟 YAML 校验、CLI help、GUI self-test/hidden init、虚拟 agent probe，以及可用时的全局 `mcu-bluetooth-executor` skill quick_validate。默认不会打开 COM8 或任何真实串口，结果写入 `reports/no_hardware_verification_summary.json`。
