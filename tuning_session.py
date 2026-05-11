@@ -53,6 +53,28 @@ class CommandResult:
 
 
 @dataclass
+class ActionResult:
+    ok: bool
+    action: str
+    state: str
+    message: str = ""
+    error_code: str | None = None
+    data: dict[str, Any] = field(default_factory=dict)
+
+    def to_record(self) -> dict[str, Any]:
+        record: dict[str, Any] = {
+            "ok": self.ok,
+            "action": self.action,
+            "state": self.state,
+            "message": self.message,
+            **self.data,
+        }
+        if self.error_code is not None:
+            record["error_code"] = self.error_code
+        return record
+
+
+@dataclass
 class TelemetryResult:
     samples: list[dict[str, Any]]
     malformed_count: int
@@ -504,6 +526,8 @@ class TuningSession:
         self.pause_requested = False
         self.session_id = f"{self.plan.get('plan_name', 'mcu_tuning')}_{now_stamp()}"
         self.state = self.STATE_IDLE
+        self.current_parameter_key: str | None = None
+        self.baseline_parameters: dict[str, float] | None = None
 
         self.parameters = {param["key"]: dict(param) for param in plan["parameters"]}
         self.current = {key: float(param["current"]) for key, param in self.parameters.items()}
@@ -545,14 +569,78 @@ class TuningSession:
         if self.event_handler is not None:
             self.event_handler(event)
 
+    def _reject_action(self, action: str, code: str, message: str, **data: Any) -> ActionResult:
+        result = ActionResult(
+            ok=False,
+            action=action,
+            state=self.state,
+            message=message,
+            error_code=code,
+            data=dict(data),
+        )
+        self.emit(
+            "action_rejected",
+            message,
+            action=action,
+            code=code,
+            error_code=code,
+            state=self.state,
+            session_id=self.session_id,
+            **data,
+        )
+        return result
+
     def request_stop(self) -> None:
         self.stop_requested = True
 
     def request_pause(self) -> None:
         self.pause_requested = True
 
-    def resume(self) -> None:
+    def resume(self) -> ActionResult:
+        if self.state != self.STATE_PAUSED:
+            return self._reject_action(
+                "resume",
+                "session_not_paused",
+                f"Cannot resume while session state is {self.state}.",
+            )
         self.pause_requested = False
+        return ActionResult(ok=True, action="resume", state=self.state, message="Resume requested.")
+
+    def skip_current_param(self) -> ActionResult:
+        if self.current_parameter_key is None:
+            return self._reject_action(
+                "skip_current_param",
+                "no_active_parameter",
+                "Cannot skip because no current parameter is active.",
+            )
+        return self._reject_action(
+            "skip_current_param",
+            "skip_not_available",
+            "Skipping the active parameter is not available until skip control is implemented.",
+            key=self.current_parameter_key,
+        )
+
+    def rollback_to(self, target: str) -> ActionResult:
+        if target not in {"last_stable", "baseline"}:
+            return self._reject_action(
+                "rollback_to",
+                "invalid_rollback_target",
+                f"Unsupported rollback target: {target}.",
+                target=target,
+            )
+        if self.baseline_parameters is None:
+            return self._reject_action(
+                "rollback_to",
+                "baseline_missing",
+                "Cannot roll back before a baseline exists.",
+                target=target,
+            )
+        return self._reject_action(
+            "rollback_to",
+            "rollback_not_available",
+            "Rollback control is not available until rollback targets are implemented.",
+            target=target,
+        )
 
     def _wait_if_paused(self) -> None:
         previous_state = self.state
@@ -735,6 +823,7 @@ class TuningSession:
                     self._set_state(self.STATE_ERROR, "baseline_failed")
                     raise ExecutionError(f"baseline failed: {', '.join(baseline_failures)}")
                 self.final_score = self.baseline_score
+                self.baseline_parameters = dict(self.current)
                 self.emit(
                     "baseline",
                     f"Baseline score: {self.baseline_score:.6g}",
@@ -754,16 +843,19 @@ class TuningSession:
                         break
 
                     key = parameter_order[(round_index - 1) % len(parameter_order)]
+                    self.current_parameter_key = key
                     param = self.parameters[key]
                     step = min(self.steps[key], float(param["max_delta_per_round"]))
                     trial_value = build_trial_value(self.current[key], step, self.directions[key], param)
                     if trial_value is None:
                         self.emit("round", f"Round {round_index}: skip {key}, no in-range trial value remains", round=round_index, key=key)
+                        self.current_parameter_key = None
                         continue
 
                     self.emit("round", f"Round {round_index}: {key} -> {trial_value:g}", round=round_index, key=key, trial_value=trial_value)
                     before_params = dict(self.current)
                     trial = self.run_trial(ser, param, trial_value, self.baseline_score)
+                    self.current_parameter_key = None
 
                     rollback_status = "not_needed"
                     if trial.decision == "accept":
