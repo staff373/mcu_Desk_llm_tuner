@@ -372,7 +372,7 @@
         "Tests pass for metadata loading, selection filtering, and no-mutation behavior."
       ],
       "priority": 23,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

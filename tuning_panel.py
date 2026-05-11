@@ -66,6 +66,7 @@ class SessionWorker:
         output_queue: queue.Queue[Any],
         log_dir: Path | None = None,
         transport_factory: TransportFactory | None = None,
+        active_parameter_keys: list[str] | None = None,
     ) -> None:
         self.output_queue = output_queue
         self.session = TuningSession(
@@ -75,6 +76,11 @@ class SessionWorker:
             event_handler=self._enqueue_event,
             transport_factory=transport_factory,
         )
+        if active_parameter_keys is not None:
+            result = self.session.set_active_parameters(list(active_parameter_keys))
+            if not result.ok:
+                error_code = result.data.get("error_code") or result.data.get("code")
+                raise ValueError(f"active parameter selection rejected: {error_code or result.message}")
         self.thread = threading.Thread(target=self._run, name="tuning-session-worker", daemon=True)
         self.exit_code: int | None = None
         self.error: BaseException | None = None
@@ -169,6 +175,10 @@ class TuningPanel(tk.Tk):
         self.stop_reason = tk.StringVar(value="-")
         self.latest_event = tk.StringVar(value="-")
         self.plan_status = tk.StringVar(value="未加载")
+        self.parameter_selection_status = tk.StringVar(value="未加载参数")
+        self.parameter_axis = tk.StringVar(value="")
+        self.parameter_group = tk.StringVar(value="")
+        self.parameter_keys_text = tk.StringVar(value="")
 
         self.plan: dict[str, Any] | None = None
         self.validated_plan_path: Path | None = None
@@ -176,6 +186,13 @@ class TuningPanel(tk.Tk):
         self.session_worker: SessionWorker | None = None
         self.operator_buttons: dict[str, ttk.Button] = {}
         self.connection_buttons: dict[str, ttk.Button] = {}
+        self.parameter_metadata_by_key: dict[str, dict[str, Any]] = {}
+        self.parameter_current_values: dict[str, Any] = {}
+        self.parameter_baseline_values: dict[str, Any] = {}
+        self.parameter_last_stable_values: dict[str, Any] = {}
+        self.parameter_trial_values: dict[str, Any] = {}
+        self.parameter_active_keys: list[str] | None = None
+        self.parameter_skipped_keys: set[str] = set()
         self.connection_transport: Any | None = None
         self.session_transport_factory = session_transport_factory
         self.run_backend = run_backend or os.environ.get("MCU_TUNING_PANEL_RUN_BACKEND", "session")
@@ -376,6 +393,7 @@ class TuningPanel(tk.Tk):
 
         self._build_overview_page()
         self._build_connection_page()
+        self._build_parameter_page()
         self._build_plan_page()
         self._build_monitor_page()
         self._build_tuning_page()
@@ -491,6 +509,96 @@ class TuningPanel(tk.Tk):
         self.connection_tree.configure(yscrollcommand=scroll.set)
         self._populate_connection_tree(None)
         self._refresh_connection_controls()
+
+    def _build_parameter_page(self) -> None:
+        page = ttk.Frame(self.notebook, padding=14)
+        self.notebook.add(page, text="参数")
+        page.columnconfigure(0, weight=1)
+        page.rowconfigure(1, weight=1)
+
+        controls = ttk.Frame(page, style="Card.TFrame", padding=12)
+        controls.grid(row=0, column=0, sticky="ew", pady=(0, 14))
+        controls.columnconfigure(7, weight=1)
+        ttk.Label(controls, text="参数参与选择", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 12))
+
+        ttk.Label(controls, text="轴", style="Muted.TLabel").grid(row=0, column=1, sticky="e")
+        self.parameter_axis_combo = ttk.Combobox(
+            controls,
+            textvariable=self.parameter_axis,
+            values=[],
+            state="readonly",
+            width=12,
+        )
+        self.parameter_axis_combo.grid(row=0, column=2, sticky="w", padx=(6, 8))
+        ttk.Button(controls, text="应用轴", command=self.apply_axis_parameter_selection).grid(row=0, column=3, padx=(0, 12))
+
+        ttk.Label(controls, text="分组", style="Muted.TLabel").grid(row=0, column=4, sticky="e")
+        self.parameter_group_combo = ttk.Combobox(
+            controls,
+            textvariable=self.parameter_group,
+            values=[],
+            state="readonly",
+            width=16,
+        )
+        self.parameter_group_combo.grid(row=0, column=5, sticky="w", padx=(6, 8))
+        ttk.Button(controls, text="应用分组", command=self.apply_group_parameter_selection).grid(row=0, column=6, padx=(0, 12))
+        ttk.Button(controls, text="选择全部", command=self.select_all_parameters).grid(row=0, column=7, sticky="w")
+
+        specific = ttk.Frame(controls, style="Card.TFrame")
+        specific.grid(row=1, column=0, columnspan=8, sticky="ew", pady=(10, 0))
+        specific.columnconfigure(1, weight=1)
+        ttk.Label(specific, text="指定参数", style="Muted.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Entry(specific, textvariable=self.parameter_keys_text).grid(row=0, column=1, sticky="ew", padx=(8, 8))
+        ttk.Button(specific, text="应用指定键", command=self.apply_specific_parameter_selection).grid(row=0, column=2)
+        ttk.Label(specific, textvariable=self.parameter_selection_status, style="Muted.TLabel").grid(
+            row=1,
+            column=0,
+            columnspan=3,
+            sticky="w",
+            pady=(8, 0),
+        )
+
+        table_card = ttk.Frame(page, style="Card.TFrame", padding=12)
+        table_card.grid(row=1, column=0, sticky="nsew")
+        table_card.rowconfigure(1, weight=1)
+        table_card.columnconfigure(0, weight=1)
+        ttk.Label(table_card, text="参数运行视图", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+        self.parameter_tree = ttk.Treeview(
+            table_card,
+            columns=("key", "current", "baseline", "last_stable", "trial", "range", "step", "participation"),
+            show="headings",
+            height=14,
+        )
+        headings = {
+            "key": "参数",
+            "current": "当前值",
+            "baseline": "基线",
+            "last_stable": "稳定值",
+            "trial": "试验值",
+            "range": "范围",
+            "step": "步长",
+            "participation": "参与状态",
+        }
+        widths = {
+            "key": 100,
+            "current": 95,
+            "baseline": 95,
+            "last_stable": 95,
+            "trial": 95,
+            "range": 130,
+            "step": 130,
+            "participation": 100,
+        }
+        for column, heading in headings.items():
+            self.parameter_tree.heading(column, text=heading)
+            self.parameter_tree.column(column, width=widths[column], anchor="center")
+        self.parameter_tree.tag_configure("oddrow", background=self.colors["panel_soft"])
+        self.parameter_tree.tag_configure("evenrow", background="#ffffff")
+        self.parameter_tree.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
+        scroll = ttk.Scrollbar(table_card, orient="vertical", command=self.parameter_tree.yview)
+        scroll.grid(row=1, column=1, sticky="ns", pady=(10, 0))
+        self.parameter_tree.configure(yscrollcommand=scroll.set)
+        self._refresh_parameter_tree()
 
     def _build_plan_page(self) -> None:
         page = ttk.Frame(self.notebook, padding=14)
@@ -682,6 +790,7 @@ class TuningPanel(tk.Tk):
             self.validated_plan_path = None
             self._populate_plan_tree(None)
             self._populate_connection_tree(None)
+            self._clear_parameter_metadata("计划缺失")
             self.connection_state.set("未连接")
             self.connection_detail.set("请先校验 YAML 计划")
             messagebox.showerror("计划缺失", "请先选择有效的 mcu_tuning_plan.yaml。")
@@ -696,6 +805,7 @@ class TuningPanel(tk.Tk):
             self.validated_plan_path = None
             self._populate_plan_tree(None)
             self._populate_connection_tree(None)
+            self._clear_parameter_metadata("校验失败")
             self.connection_state.set("未连接")
             self.connection_detail.set("YAML 校验失败")
             messagebox.showerror("校验失败", str(exc))
@@ -707,6 +817,7 @@ class TuningPanel(tk.Tk):
             self.validated_plan_path = None
             self._populate_plan_tree(plan)
             self._populate_connection_tree(plan)
+            self._clear_parameter_metadata("校验失败")
             self.connection_state.set("未连接")
             self.connection_detail.set("YAML 校验失败")
             self._add_history_event("校验", f"失败：{'; '.join(validator.errors[:3])}")
@@ -727,14 +838,9 @@ class TuningPanel(tk.Tk):
         if self.connection_transport is None:
             self.connection_state.set("计划已校验，未连接")
             self.connection_detail.set(f"{self.port.get()} @ {self.baudrate.get()} 已从 YAML 加载")
-        self.param_tree.delete(*self.param_tree.get_children())
-        for index, param in enumerate(plan.get("parameters", [])):
-            key = param.get("key", "-")
-            current = param.get("current", "-")
-            bounds = f"{param.get('min', '-') }..{param.get('max', '-')}"
-            role = param.get("role", "-")
-            tag = "evenrow" if index % 2 == 0 else "oddrow"
-            self.param_tree.insert("", "end", iid=str(key), values=(key, current, bounds, role), tags=(tag,))
+        self._set_parameter_metadata_from_plan(plan, reset_selection=True)
+        self._refresh_overview_parameter_tree()
+        self._refresh_parameter_tree()
         self._populate_plan_tree(plan)
         self._populate_connection_tree(plan)
         self._refresh_tuning_tree()
@@ -744,34 +850,31 @@ class TuningPanel(tk.Tk):
         self.baudrate.set("115200")
         self.connection_state.set("演示模式")
         self.connection_detail.set("演示模式未打开真实串口")
-        self.param_tree.delete(*self.param_tree.get_children())
-        for index, (key, current, bounds, role) in enumerate([
-            ("kp_x", "350", "100..600", "primary"),
-            ("kd_x", "30", "0..80", "primary"),
-            ("kp_y", "320", "100..600", "primary"),
-            ("kd_y", "40", "0..80", "primary"),
-        ]):
-            tag = "evenrow" if index % 2 == 0 else "oddrow"
-            self.param_tree.insert("", "end", iid=key, values=(key, current, bounds, role), tags=(tag,))
+        demo_plan = self._demo_plan()
+        self._set_parameter_metadata_from_plan(demo_plan, reset_selection=True)
+        self._refresh_overview_parameter_tree()
+        self._refresh_parameter_tree()
         self._populate_demo_plan_tree()
         self._refresh_tuning_tree()
 
     def _populate_demo_plan_tree(self) -> None:
-        demo_plan = {
+        self._populate_plan_tree(self._demo_plan())
+        self._populate_connection_tree(self._demo_plan())
+
+    def _demo_plan(self) -> dict[str, Any]:
+        return {
             "schema_version": "demo",
             "transport": {"port": "DEMO", "baudrate": 115200, "line_ending": "\\r\\n"},
             "commands": {"status": "STATUS", "set": "SET {key} {value}", "telemetry_on": "START", "stop": "STOP"},
             "parameters": [
-                {"key": "kp_x", "current": 350, "min": 100, "max": 600, "role": "primary"},
-                {"key": "kd_x", "current": 30, "min": 0, "max": 80, "role": "primary"},
-                {"key": "kp_y", "current": 320, "min": 100, "max": 600, "role": "primary"},
-                {"key": "kd_y", "current": 40, "min": 0, "max": 80, "role": "primary"},
+                {"key": "kp_x", "current": 350, "min": 100, "max": 600, "initial_step": 20, "role": "primary", "group": "x_axis"},
+                {"key": "kd_x", "current": 30, "min": 0, "max": 80, "initial_step": 5, "role": "primary", "group": "x_axis"},
+                {"key": "kp_y", "current": 320, "min": 100, "max": 600, "initial_step": 20, "role": "primary", "group": "y_axis"},
+                {"key": "kd_y", "current": 40, "min": 0, "max": 80, "initial_step": 5, "role": "primary", "group": "y_axis"},
             ],
             "telemetry": {"format": "CSV + DAT JSON demo", "sample_period_ms": 50},
-            "step_policy": {"max_rounds": 2, "parameter_order": ["kp_x", "kd_x"]},
+            "step_policy": {"max_rounds": 2, "parameter_order": ["kp_x", "kd_x", "kp_y", "kd_y"]},
         }
-        self._populate_plan_tree(demo_plan)
-        self._populate_connection_tree(demo_plan)
 
     def _display_value(self, value: Any) -> str:
         if value is None:
@@ -785,6 +888,229 @@ class TuningPanel(tk.Tk):
         if isinstance(value, dict):
             return json.dumps(value, ensure_ascii=False)
         return str(value)
+
+    def _ordered_plan_parameters(self, plan: dict[str, Any]) -> list[dict[str, Any]]:
+        by_key = {
+            str(param.get("key")): dict(param)
+            for param in plan.get("parameters", [])
+            if isinstance(param, dict) and param.get("key")
+        }
+        ordered: list[dict[str, Any]] = []
+        for key in plan.get("step_policy", {}).get("parameter_order", []):
+            key_text = str(key)
+            if key_text in by_key and by_key[key_text] not in ordered:
+                ordered.append(by_key[key_text])
+        for param in by_key.values():
+            if param not in ordered:
+                ordered.append(param)
+        return ordered
+
+    def _set_parameter_metadata_from_plan(self, plan: dict[str, Any], *, reset_selection: bool) -> None:
+        ordered_params = self._ordered_plan_parameters(plan)
+        self.parameter_metadata_by_key = {str(param["key"]): dict(param) for param in ordered_params}
+        self.parameter_current_values = {
+            key: param.get("current", "-")
+            for key, param in self.parameter_metadata_by_key.items()
+        }
+        self.parameter_baseline_values = {}
+        self.parameter_last_stable_values = dict(self.parameter_current_values)
+        self.parameter_trial_values = {}
+        self.parameter_skipped_keys = set()
+        if reset_selection:
+            self.parameter_active_keys = None
+            self.parameter_keys_text.set("")
+            self.parameter_selection_status.set(f"参数就绪：{len(self.parameter_metadata_by_key)} 个参数")
+        self._refresh_parameter_selection_options()
+
+    def _clear_parameter_metadata(self, status: str = "未加载参数") -> None:
+        self.parameter_metadata_by_key = {}
+        self.parameter_current_values = {}
+        self.parameter_baseline_values = {}
+        self.parameter_last_stable_values = {}
+        self.parameter_trial_values = {}
+        self.parameter_active_keys = None
+        self.parameter_skipped_keys = set()
+        self.parameter_keys_text.set("")
+        self.parameter_selection_status.set(status)
+        self._refresh_parameter_selection_options()
+        self._refresh_overview_parameter_tree()
+        self._refresh_parameter_tree()
+
+    def _refresh_parameter_selection_options(self) -> None:
+        axes = sorted(
+            {
+                axis
+                for param in self.parameter_metadata_by_key.values()
+                for axis in [self._parameter_axis(param)]
+                if axis
+            }
+        )
+        groups = sorted(
+            {
+                str(param.get("group"))
+                for param in self.parameter_metadata_by_key.values()
+                if param.get("group") not in {None, ""}
+            }
+        )
+        if hasattr(self, "parameter_axis_combo"):
+            self.parameter_axis_combo.configure(values=axes)
+        if hasattr(self, "parameter_group_combo"):
+            self.parameter_group_combo.configure(values=groups)
+        self.parameter_axis.set(axes[0] if axes else "")
+        self.parameter_group.set(groups[0] if groups else "")
+
+    def _parameter_axis(self, param: dict[str, Any]) -> str:
+        group = str(param.get("group", "")).lower()
+        key = str(param.get("key", "")).lower()
+        for source in (group, key):
+            parts = [part for part in re.split(r"[^a-z0-9]+", source) if part]
+            for axis in ("x", "y", "z", "roll", "pitch", "yaw"):
+                if axis in parts or source.startswith(f"{axis}_") or source.endswith(f"_{axis}") or source == axis:
+                    return axis
+        return ""
+
+    def _declared_parameter_keys(self) -> list[str]:
+        return list(self.parameter_metadata_by_key)
+
+    def _default_active_parameter_keys(self) -> list[str]:
+        if self.plan is None:
+            return self._declared_parameter_keys()
+        declared = set(self.parameter_metadata_by_key)
+        ordered = [
+            str(key)
+            for key in self.plan.get("step_policy", {}).get("parameter_order", [])
+            if str(key) in declared
+        ]
+        return ordered or self._declared_parameter_keys()
+
+    def _active_parameter_keys_for_gui(self) -> list[str]:
+        if self.parameter_active_keys is not None:
+            return list(self.parameter_active_keys)
+        return self._default_active_parameter_keys()
+
+    def _refresh_overview_parameter_tree(self) -> None:
+        if not hasattr(self, "param_tree"):
+            return
+        self.param_tree.delete(*self.param_tree.get_children())
+        for index, (key, param) in enumerate(self.parameter_metadata_by_key.items()):
+            current = self.parameter_current_values.get(key, param.get("current", "-"))
+            bounds = f"{param.get('min', '-')}..{param.get('max', '-')}"
+            role = param.get("role", "-")
+            tag = "evenrow" if index % 2 == 0 else "oddrow"
+            self.param_tree.insert("", "end", iid=key, values=(key, current, bounds, role), tags=(tag,))
+
+    def _parameter_participation_label(self, key: str) -> str:
+        if key in self.parameter_skipped_keys:
+            return "已跳过"
+        if self.session is not None and str(getattr(self.session, "current_parameter_key", "")) == key:
+            return "当前"
+        return "参与" if key in set(self._active_parameter_keys_for_gui()) else "未参与"
+
+    def _refresh_parameter_tree(self) -> None:
+        if not hasattr(self, "parameter_tree"):
+            return
+        self.parameter_tree.delete(*self.parameter_tree.get_children())
+        for index, (key, param) in enumerate(self.parameter_metadata_by_key.items()):
+            tag = "evenrow" if index % 2 == 0 else "oddrow"
+            bounds = f"{param.get('min', '-')}..{param.get('max', '-')}"
+            step_parts = []
+            if param.get("initial_step") is not None:
+                step_parts.append(f"initial={param.get('initial_step')}")
+            if param.get("max_delta_per_round") is not None:
+                step_parts.append(f"max_delta={param.get('max_delta_per_round')}")
+            step = ", ".join(step_parts) if step_parts else "-"
+            self.parameter_tree.insert(
+                "",
+                "end",
+                iid=key,
+                values=(
+                    key,
+                    self._display_value(self.parameter_current_values.get(key, param.get("current"))),
+                    self._display_value(self.parameter_baseline_values.get(key)),
+                    self._display_value(self.parameter_last_stable_values.get(key)),
+                    self._display_value(self.parameter_trial_values.get(key)),
+                    bounds,
+                    step,
+                    self._parameter_participation_label(key),
+                ),
+                tags=(tag,),
+            )
+
+    def _reject_parameter_selection(self, detail: str) -> bool:
+        self.parameter_selection_status.set(f"选择拒绝：{detail}")
+        self._add_history_event("参数", f"选择拒绝：{detail}")
+        self._refresh_parameter_tree()
+        return False
+
+    def _apply_parameter_selection(self, keys: list[str], label: str) -> bool:
+        if self.plan is None and not self.parameter_metadata_by_key:
+            return self._reject_parameter_selection("请先校验 YAML 计划")
+        if self._task_running():
+            return self._reject_parameter_selection("当前任务运行中，不能修改本轮参数选择")
+
+        normalized: list[str] = []
+        for key in keys:
+            key_text = str(key).strip()
+            if key_text and key_text not in normalized:
+                normalized.append(key_text)
+        if not normalized:
+            return self._reject_parameter_selection("没有匹配的参数")
+
+        unknown = [key for key in normalized if key not in self.parameter_metadata_by_key]
+        if unknown:
+            return self._reject_parameter_selection(f"未知参数：{', '.join(unknown)}")
+
+        self.parameter_active_keys = normalized
+        self.parameter_keys_text.set(", ".join(normalized))
+        self.parameter_selection_status.set(f"已选择 {label}：{', '.join(normalized)}")
+        self._add_history_event("参数", f"本轮参与参数：{', '.join(normalized)}")
+        self._refresh_parameter_tree()
+        return True
+
+    def select_all_parameters(self) -> bool:
+        return self._apply_parameter_selection(self._declared_parameter_keys(), "全部")
+
+    def apply_axis_parameter_selection(self) -> bool:
+        axis = self.parameter_axis.get().strip()
+        keys = [
+            key
+            for key, param in self.parameter_metadata_by_key.items()
+            if self._parameter_axis(param) == axis
+        ]
+        return self._apply_parameter_selection(keys, f"轴 {axis}" if axis else "轴")
+
+    def apply_group_parameter_selection(self) -> bool:
+        group = self.parameter_group.get().strip()
+        keys = [
+            key
+            for key, param in self.parameter_metadata_by_key.items()
+            if str(param.get("group", "")) == group
+        ]
+        return self._apply_parameter_selection(keys, f"分组 {group}" if group else "分组")
+
+    def apply_specific_parameter_selection(self) -> bool:
+        text = self.parameter_keys_text.get()
+        keys = [part for part in re.split(r"[\s,;]+", text) if part]
+        return self._apply_parameter_selection(keys, "指定键")
+
+    def _sync_parameter_state_from_session(self) -> None:
+        if self.session is None:
+            return
+        current = getattr(self.session, "current", None)
+        if isinstance(current, dict):
+            self.parameter_current_values.update({str(key): value for key, value in current.items()})
+        baseline = getattr(self.session, "baseline_parameters", None)
+        if isinstance(baseline, dict):
+            self.parameter_baseline_values.update({str(key): value for key, value in baseline.items()})
+        last_stable = getattr(self.session, "last_stable", None)
+        if isinstance(last_stable, dict):
+            self.parameter_last_stable_values.update({str(key): value for key, value in last_stable.items()})
+        active_keys = getattr(self.session, "active_parameter_keys", None)
+        if isinstance(active_keys, list):
+            self.parameter_active_keys = [str(key) for key in active_keys]
+        skipped_keys = getattr(self.session, "skipped_parameter_keys", None)
+        if isinstance(skipped_keys, (set, list, tuple)):
+            self.parameter_skipped_keys = {str(key) for key in skipped_keys}
 
     def _populate_plan_tree(self, plan: dict[str, Any] | None) -> None:
         if not hasattr(self, "plan_tree"):
@@ -1064,6 +1390,7 @@ class TuningPanel(tk.Tk):
             return
         for key, value in params.items():
             item_id = str(key)
+            self.parameter_current_values[item_id] = value
             if not self.param_tree.exists(item_id):
                 continue
             old_values = list(self.param_tree.item(item_id, "values"))
@@ -1071,6 +1398,7 @@ class TuningPanel(tk.Tk):
                 old_values.append("-")
             old_values[1] = str(value)
             self.param_tree.item(item_id, values=old_values)
+        self._refresh_parameter_tree()
 
     def _task_running(self) -> bool:
         return self.proc is not None or (self.session_worker is not None and self.session_worker.is_alive())
@@ -1168,6 +1496,7 @@ class TuningPanel(tk.Tk):
             plan_path=plan_path,
             output_queue=self.output_queue,
             transport_factory=self.session_transport_factory,
+            active_parameter_keys=self.parameter_active_keys,
         )
         self.session = self.session_worker.session
         self.status.set("运行中")
@@ -1247,6 +1576,9 @@ class TuningPanel(tk.Tk):
         line = self._session_event_to_line(event)
         self._append_log_line(line, self._session_event_log_tag(event))
         self._update_from_session_event(event, line)
+        self._sync_parameter_state_from_session()
+        self._refresh_parameter_tree()
+        self._refresh_overview_parameter_tree()
         self._refresh_tuning_tree()
 
     def _append_log_line(self, line: str, tag: str | None = None) -> None:
@@ -1293,6 +1625,10 @@ class TuningPanel(tk.Tk):
             round_index = event.data.get("round")
             if round_index is not None:
                 self.current_round.set(str(round_index))
+            key = event.data.get("key")
+            trial_value = event.data.get("trial_value")
+            if key is not None and trial_value is not None:
+                self.parameter_trial_values[str(key)] = trial_value
             self.decision.set("试验")
             return
         if event.type == "decision":
@@ -1364,6 +1700,15 @@ class TuningPanel(tk.Tk):
         stop_reason = summary.get("stop_reason")
         if stop_reason is not None:
             self.stop_reason.set(str(stop_reason))
+        last_stable = summary.get("last_stable")
+        if isinstance(last_stable, dict):
+            self.parameter_last_stable_values.update({str(key): value for key, value in last_stable.items()})
+        active_keys = summary.get("active_parameter_keys")
+        if isinstance(active_keys, list):
+            self.parameter_active_keys = [str(key) for key in active_keys]
+        skipped_keys = summary.get("skipped_parameter_keys")
+        if isinstance(skipped_keys, list):
+            self.parameter_skipped_keys = {str(key) for key in skipped_keys}
         final_parameters = summary.get("final_parameters")
         if isinstance(final_parameters, dict):
             self._update_parameter_values(final_parameters)
@@ -1461,6 +1806,10 @@ class TuningPanel(tk.Tk):
         if round_match:
             self.current_round.set(round_match.group(1))
             self._add_history_event("轮次", line)
+        trial_match = re.search(r"(?:Round|第)\s*\d+\s*(?:轮)?[:：]\s*([A-Za-z0-9_.-]+)\s*->\s*([-+]?\d+(?:\.\d+)?)", line)
+        if trial_match:
+            self.parameter_trial_values[trial_match.group(1)] = trial_match.group(2)
+            self._refresh_parameter_tree()
         if lower_line.startswith("accept") or " accept:" in lower_line:
             self.decision.set("接受")
             self._increment_counter(self.accepted_count)
@@ -1629,6 +1978,13 @@ class TuningPanel(tk.Tk):
         self.failed_count.set("0")
         self.stop_reason.set("-")
         self.latest_event.set("-")
+        self.parameter_baseline_values = {}
+        self.parameter_trial_values = {}
+        self.parameter_skipped_keys = set()
+        if self.parameter_metadata_by_key:
+            self.parameter_last_stable_values = dict(self.parameter_current_values)
+            self._refresh_parameter_tree()
+            self._refresh_overview_parameter_tree()
         if hasattr(self, "history_tree"):
             self.history_tree.delete(*self.history_tree.get_children())
         self._refresh_tuning_tree()
