@@ -64,7 +64,7 @@
         "Tests pass for pause before baseline, pause during tuning, and resume after pause."
       ],
       "priority": 4,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

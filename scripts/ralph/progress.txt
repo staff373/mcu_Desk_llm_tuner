@@ -9,6 +9,7 @@ Started: 2026-05-11 12:00:00
 - Real serial commands must come only from YAML or validated `TuningSession` control flow.
 - Early session-core tests can use root-level `unittest` files and patch `tuning_session.serial.Serial` with fakes to prove no real serial port is opened.
 - Session control APIs should return `ActionResult`; rejected controls emit `action_rejected` events with `action`, `code`, `error_code`, `state`, and `session_id`.
+- Pause/resume no-hardware tests can call `resume()` from the structured `paused` state event handler to avoid background thread timing sleeps while still exercising safe checkpoints.
 
 ## 2026-05-11 12:14:10 - US-001
 - Implemented stable `TuningSessionState` values and readable `TuningSession.state`, initialized to `idle` without opening serial.
@@ -44,4 +45,16 @@ Started: 2026-05-11 12:00:00
 - Learnings for future iterations:
   - Invalid control tests can patch `tuning_session.serial.Serial` with a constructor that raises to prove guardrail methods do not touch serial.
   - `baseline_parameters is None` is the current no-baseline guard for rollback control.
+---
+
+## 2026-05-11 12:32:32 - US-004
+- Implemented `pause()` as a structured control action, kept `request_pause()` as a compatibility wrapper, and made `resume()` emit an action event while returning to the previous runnable state.
+- Added safe pause checkpoints before baseline collection, before baseline sampling, at each tuning round boundary, and immediately before the trial `SET` command.
+- Files changed: `tuning_session.py`, `test_tuning_session_pause_resume.py`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`, `project_status.md`, `.project_checkpoints/US-004/20260511-123000/`.
+- Verification commands and results: `python -m py_compile tuning_session.py test_tuning_session_state.py test_tuning_session_state_events.py test_tuning_session_invalid_controls.py test_tuning_session_pause_resume.py` passed; `python -m unittest test_tuning_session_pause_resume.py test_tuning_session_invalid_controls.py test_tuning_session_state.py test_tuning_session_state_events.py` passed with 9 tests.
+- Checkpoint path: `.project_checkpoints/US-004/20260511-123000/`
+- Real serial status: not opened
+- Learnings for future iterations:
+  - A fake serial class can stage telemetry after `TEL_ON` and after YAML `SET` commands to exercise baseline and trial phases deterministically.
+  - Event order assertions are the simplest way to prove no YAML `SET` command is sent while the session is in `paused`.
 ---

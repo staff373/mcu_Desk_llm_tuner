@@ -524,6 +524,7 @@ class TuningSession:
         self.event_handler = event_handler
         self.stop_requested = False
         self.pause_requested = False
+        self._paused_return_state: str | None = None
         self.session_id = f"{self.plan.get('plan_name', 'mcu_tuning')}_{now_stamp()}"
         self.state = self.STATE_IDLE
         self.current_parameter_key: str | None = None
@@ -593,8 +594,34 @@ class TuningSession:
     def request_stop(self) -> None:
         self.stop_requested = True
 
-    def request_pause(self) -> None:
-        self.pause_requested = True
+    def pause(self) -> ActionResult:
+        if self.state in {self.STATE_STOPPING, self.STATE_STOPPED, self.STATE_ERROR}:
+            return self._reject_action(
+                "pause",
+                "session_not_pausable",
+                f"Cannot pause while session state is {self.state}.",
+            )
+        if not self.pause_requested:
+            self.pause_requested = True
+        result = ActionResult(
+            ok=True,
+            action="pause",
+            state=self.state,
+            message="Pause requested.",
+            data={"pending": self.state != self.STATE_PAUSED},
+        )
+        self.emit(
+            "action",
+            result.message,
+            action="pause",
+            state=self.state,
+            session_id=self.session_id,
+            pending=result.data["pending"],
+        )
+        return result
+
+    def request_pause(self) -> ActionResult:
+        return self.pause()
 
     def resume(self) -> ActionResult:
         if self.state != self.STATE_PAUSED:
@@ -603,8 +630,26 @@ class TuningSession:
                 "session_not_paused",
                 f"Cannot resume while session state is {self.state}.",
             )
+        paused_state = self.state
+        resume_state = self._paused_return_state or self.STATE_TUNING
         self.pause_requested = False
-        return ActionResult(ok=True, action="resume", state=self.state, message="Resume requested.")
+        self._paused_return_state = None
+        self.emit(
+            "action",
+            "Resume requested.",
+            action="resume",
+            state=paused_state,
+            next_state=resume_state,
+            session_id=self.session_id,
+        )
+        self._set_state(resume_state, "resume_requested")
+        return ActionResult(
+            ok=True,
+            action="resume",
+            state=self.state,
+            message="Resume requested.",
+            data={"previous_state": paused_state},
+        )
 
     def skip_current_param(self) -> ActionResult:
         if self.current_parameter_key is None:
@@ -643,13 +688,16 @@ class TuningSession:
         )
 
     def _wait_if_paused(self) -> None:
-        previous_state = self.state
         if self.pause_requested and not self.stop_requested:
-            self._set_state(self.STATE_PAUSED, "pause_requested")
+            if self.state != self.STATE_PAUSED:
+                self._paused_return_state = self.state
+                self._set_state(self.STATE_PAUSED, "pause_requested")
         while self.pause_requested and not self.stop_requested:
             time.sleep(0.05)
         if self.state == self.STATE_PAUSED:
-            self._set_state(previous_state, "resume_requested")
+            resume_state = self._paused_return_state or self.STATE_TUNING
+            self._paused_return_state = None
+            self._set_state(resume_state, "resume_requested")
 
     def _prepare_log_path(self) -> Path:
         log_dir = self.log_dir
@@ -815,7 +863,11 @@ class TuningSession:
                     raise ExecutionError(start.error or "telemetry_on failed")
 
             try:
+                self._wait_if_paused()
+
                 self._set_state(self.STATE_BASELINE, "baseline_started")
+                self._wait_if_paused()
+
                 self.emit("info", f"Collecting baseline for {scoring['baseline_window_ms']} ms...")
                 baseline_telemetry = collect_telemetry(ser, self.plan, int(scoring["baseline_window_ms"]), self.event_handler)
                 self.baseline_score, baseline_failures = score_window(self.plan, baseline_telemetry)
@@ -853,6 +905,12 @@ class TuningSession:
                         continue
 
                     self.emit("round", f"Round {round_index}: {key} -> {trial_value:g}", round=round_index, key=key, trial_value=trial_value)
+                    self._wait_if_paused()
+                    if self.stop_requested:
+                        self.current_parameter_key = None
+                        self.stop_reason = "manual_stop"
+                        break
+
                     before_params = dict(self.current)
                     trial = self.run_trial(ser, param, trial_value, self.baseline_score)
                     self.current_parameter_key = None
