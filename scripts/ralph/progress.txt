@@ -21,6 +21,7 @@ Started: 2026-05-11 12:00:00
 - Virtual scoring targets can be declared per test-only fixture parameter with `virtual_target`; `VirtualTransport` falls back to `current` when no target is declared.
 - Agent-facing no-hardware controls live in `agent_console_probe.py`; inject `VirtualTransport` through `AgentControlFacade(transport_factory_provider=...)` and patch `tuning_session.serial.Serial` to assert no real serial port opens.
 - The standalone agent probe CLI is `python agent_console_probe.py`; it uses `run_probe(...)`, blocks `serial.Serial`, validates required action/event coverage, and supports `--require-event` for missing-event negative tests.
+- Session report export schema is enforced by `validate_session_report_schema(...)` in `agent_console_probe.py`; reuse it for later report, replay, and verification work.
 
 ## 2026-05-11 12:14:10 - US-001
 - Implemented stable `TuningSessionState` values and readable `TuningSession.state`, initialized to `idle` without opening serial.
@@ -235,4 +236,17 @@ Started: 2026-05-11 12:00:00
   - The probe CLI should remain a thin wrapper over `AgentControlFacade`; keep arbitrary serial write/send helpers out of this surface.
   - `--require-event` is the negative-test hook for proving the CLI exits non-zero when required structured events are missing.
   - Probe artifacts include `report.json`, `summary.json`, and the session JSONL under the chosen `--log-dir`.
+---
+
+## 2026-05-11 14:33:12 - US-018
+- Implemented schema-versioned session report export with plan path, session id, action log, event counts, final summary, generated artifact paths, artifact existence flags, and virtual no-hardware serial safety status.
+- Added lightweight report schema validation and no-hardware tests for successful, stopped, and error session report exports.
+- Files changed: `agent_console_probe.py`, `test_session_report_export.py`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`, `project_status.md`, `.project_checkpoints/US-018/20260511-142859/`.
+- Verification commands and results: `python -m py_compile agent_console_probe.py tuning_session.py test_session_report_export.py` passed; `python -m unittest test_session_report_export.py` passed with 3 tests; `python -m unittest test_agent_control_facade.py test_agent_console_probe_cli.py` passed with 5 tests; `python validate_plan.py .\fixtures\virtual_mcu_tuning_plan.yaml` passed with `RESULT: valid`; `python agent_console_probe.py --log-dir .project_checkpoints\US-018\20260511-142859\probe_artifacts --summary .project_checkpoints\US-018\20260511-142859\probe_artifacts\summary.json --report .project_checkpoints\US-018\20260511-142859\probe_artifacts\report.json` exited 0 with `real_serial_status=not opened`; `python -m py_compile agent_console_probe.py tuning_session.py validate_plan.py test_session_report_export.py test_agent_control_facade.py test_agent_console_probe_cli.py` passed; `python -m unittest discover -p "test_*.py"` passed with 48 tests; `python run_tuning_plan.py --help` and `python monitor_tuning_plan.py --help` passed.
+- Checkpoint path: `.project_checkpoints/US-018/20260511-142859/`
+- Real serial status: not opened
+- Learnings for future iterations:
+  - Use `validate_session_report_schema(...)` for required-field checks before consuming exported agent reports.
+  - Report exports include `artifact_paths.report`, `artifact_paths.session_log` when a run created JSONL, and matching `artifact_exists` booleans.
+  - Virtual/no-hardware report evidence is stored in `serial_safety.real_serial_status`, `serial_safety.statement`, and `serial_safety.serial_open_attempts`.
 ---

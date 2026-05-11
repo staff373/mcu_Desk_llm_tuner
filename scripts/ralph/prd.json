@@ -288,7 +288,7 @@
         "Tests pass for report schema, required fields, and artifact existence."
       ],
       "priority": 18,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
