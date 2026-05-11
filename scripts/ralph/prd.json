@@ -80,7 +80,7 @@
         "Tests pass for stopping before connection, after connection, and during virtual tuning."
       ],
       "priority": 5,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

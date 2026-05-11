@@ -94,6 +94,10 @@ class ExecutionError(RuntimeError):
     pass
 
 
+class StopRequested(RuntimeError):
+    pass
+
+
 class TuningSessionState:
     IDLE = "idle"
     VALIDATING = "validating"
@@ -541,6 +545,7 @@ class TuningSession:
         self.failed = 0
         self.rolled_back = 0
         self.stop_reason = "max_rounds"
+        self.stop_command_results: list[dict[str, Any]] = []
         self.baseline_score: float | None = None
         self.final_score: float | None = None
         self.log_path: Path | None = None
@@ -591,8 +596,95 @@ class TuningSession:
         )
         return result
 
-    def request_stop(self) -> None:
+    def _record_stop_command_result(
+        self,
+        name: str,
+        command: str | None,
+        status: str,
+        *,
+        error: str | None = None,
+        lines: list[str] | None = None,
+        reason: str | None = None,
+    ) -> None:
+        record: dict[str, Any] = {
+            "name": name,
+            "status": status,
+        }
+        if command is not None:
+            record["command"] = command
+        if error:
+            record["error"] = error
+        if lines:
+            record["lines"] = list(lines)
+        if reason:
+            record["reason"] = reason
+        self.stop_command_results.append(record)
+        self.emit(
+            "action",
+            f"Stop command {name}: {status}",
+            action="stop_command",
+            state=self.state,
+            session_id=self.session_id,
+            **record,
+        )
+
+    def _record_unavailable_stop_commands(self, reason: str) -> None:
+        if self.stop_command_results:
+            return
+        commands = self.plan.get("commands", {})
+        for name in ("telemetry_off", "stop"):
+            self._record_stop_command_result(
+                name,
+                commands.get(name),
+                "unavailable",
+                reason=reason,
+            )
+
+    def _finish_without_connection(self, log_path: Path, reason: str) -> int:
+        if self.stop_reason == "max_rounds":
+            self.stop_reason = "manual_stop"
+        self._record_unavailable_stop_commands("no_connection")
+        if self.state != self.STATE_STOPPED:
+            if self.state != self.STATE_STOPPING:
+                self._set_state(self.STATE_STOPPING, "stop_requested")
+            self._set_state(self.STATE_STOPPED, reason)
+        summary = self.summary()
+        log_record(log_path, {"summary": summary})
+        self.emit("summary", "", summary=summary)
+        return 0
+
+    def request_stop(self) -> ActionResult:
+        previous_state = self.state
+        already_requested = self.stop_requested or self.state in {self.STATE_STOPPING, self.STATE_STOPPED}
         self.stop_requested = True
+        self.pause_requested = False
+        self._paused_return_state = None
+        if previous_state not in {self.STATE_STOPPED, self.STATE_ERROR} and self.stop_reason == "max_rounds":
+            self.stop_reason = "manual_stop"
+        self.emit(
+            "action",
+            "Stop requested.",
+            action="stop",
+            state=previous_state,
+            session_id=self.session_id,
+            already_requested=already_requested,
+        )
+        if previous_state == self.STATE_IDLE:
+            self._set_state(self.STATE_STOPPING, "stop_requested")
+            self._record_unavailable_stop_commands("no_connection")
+            self._set_state(self.STATE_STOPPED, "stop_completed_without_connection")
+        elif previous_state not in {self.STATE_STOPPING, self.STATE_STOPPED, self.STATE_ERROR}:
+            self._set_state(self.STATE_STOPPING, "stop_requested")
+        return ActionResult(
+            ok=True,
+            action="stop",
+            state=self.state,
+            message="Stop requested.",
+            data={
+                "previous_state": previous_state,
+                "already_requested": already_requested,
+            },
+        )
 
     def pause(self) -> ActionResult:
         if self.state in {self.STATE_STOPPING, self.STATE_STOPPED, self.STATE_ERROR}:
@@ -747,6 +839,7 @@ class TuningSession:
         for key in ["telemetry_off", "stop"]:
             command = commands.get(key)
             if not command:
+                self._record_stop_command_result(key, None, "unavailable", reason="missing_yaml_command")
                 continue
             result = send_command(
                 ser,
@@ -755,10 +848,14 @@ class TuningSession:
                 commands["ok_pattern"],
                 commands.get("error_patterns", []),
                 int(transport["read_timeout_ms"]),
-                require_ok=False,
+                require_ok=True,
                 event_handler=self.event_handler,
             )
-            if not result.ok:
+            if result.ok:
+                self._record_stop_command_result(key, command, "succeeded", lines=result.lines)
+            else:
+                status = "timed_out" if result.error and "timeout" in result.error.lower() else "failed"
+                self._record_stop_command_result(key, command, status, error=result.error, lines=result.lines)
                 self.emit("warning", f"stop command `{command}` did not complete cleanly: {result.error}")
 
     def run_trial(
@@ -823,7 +920,13 @@ class TuningSession:
 
     def run(self) -> int:
         log_path = self._prepare_log_path()
+        if self.stop_requested and self.state in {self.STATE_STOPPING, self.STATE_STOPPED}:
+            return self._finish_without_connection(log_path, "stop_completed_without_connection")
+
         self._set_state(self.STATE_VALIDATING, "run_started")
+        if self.stop_requested:
+            return self._finish_without_connection(log_path, "stop_requested_before_connection")
+
         transport = self.plan["transport"]
         commands = self.plan["commands"]
         scoring = self.plan["scoring"]
@@ -833,21 +936,22 @@ class TuningSession:
 
         with serial.Serial(**serial_kwargs(transport)) as ser:
             self._set_state(self.STATE_CONNECTED, "serial_opened")
-            status = send_command(
-                ser,
-                commands["status"],
-                transport["line_ending"],
-                commands["ok_pattern"],
-                commands.get("error_patterns", []),
-                int(transport["read_timeout_ms"]),
-                require_ok=True,
-                event_handler=self.event_handler,
-            )
-            if not status.ok:
-                self._set_state(self.STATE_ERROR, "initial_status_failed")
-                raise ExecutionError(status.error or "initial STATUS failed")
+            if not self.stop_requested:
+                status = send_command(
+                    ser,
+                    commands["status"],
+                    transport["line_ending"],
+                    commands["ok_pattern"],
+                    commands.get("error_patterns", []),
+                    int(transport["read_timeout_ms"]),
+                    require_ok=True,
+                    event_handler=self.event_handler,
+                )
+                if not status.ok:
+                    self._set_state(self.STATE_ERROR, "initial_status_failed")
+                    raise ExecutionError(status.error or "initial STATUS failed")
 
-            if commands.get("telemetry_on"):
+            if not self.stop_requested and commands.get("telemetry_on"):
                 start = send_command(
                     ser,
                     commands["telemetry_on"],
@@ -864,9 +968,15 @@ class TuningSession:
 
             try:
                 self._wait_if_paused()
+                if self.stop_requested:
+                    self.stop_reason = "manual_stop"
+                    raise StopRequested()
 
                 self._set_state(self.STATE_BASELINE, "baseline_started")
                 self._wait_if_paused()
+                if self.stop_requested:
+                    self.stop_reason = "manual_stop"
+                    raise StopRequested()
 
                 self.emit("info", f"Collecting baseline for {scoring['baseline_window_ms']} ms...")
                 baseline_telemetry = collect_telemetry(ser, self.plan, int(scoring["baseline_window_ms"]), self.event_handler)
@@ -885,8 +995,14 @@ class TuningSession:
                         "malformed_count": baseline_telemetry.malformed_count,
                     },
                 )
+                if self.stop_requested:
+                    self.stop_reason = "manual_stop"
+                    raise StopRequested()
 
                 self._set_state(self.STATE_TUNING, "baseline_complete")
+                if self.stop_requested:
+                    self.stop_reason = "manual_stop"
+                    raise StopRequested()
                 parameter_order = step_policy["parameter_order"]
                 for round_index in range(1, int(step_policy["max_rounds"]) + 1):
                     self._wait_if_paused()
@@ -914,6 +1030,9 @@ class TuningSession:
                     before_params = dict(self.current)
                     trial = self.run_trial(ser, param, trial_value, self.baseline_score)
                     self.current_parameter_key = None
+                    if self.stop_requested:
+                        self.stop_reason = "manual_stop"
+                        break
 
                     rollback_status = "not_needed"
                     if trial.decision == "accept":
@@ -995,9 +1114,14 @@ class TuningSession:
                     if trial.hard_failures:
                         self.stop_reason = "hard_failure"
                         break
+                    if self.stop_requested:
+                        self.stop_reason = "manual_stop"
+                        break
                 else:
                     self.stop_reason = "max_rounds"
 
+            except StopRequested:
+                self.stop_reason = "manual_stop"
             except KeyboardInterrupt:
                 self.stop_reason = "user_interrupt"
                 self.emit("info", "User interrupt received; stopping and preserving last stable parameters.")
@@ -1026,6 +1150,7 @@ class TuningSession:
             "failed": self.failed,
             "rolled_back": self.rolled_back,
             "stop_reason": self.stop_reason,
+            "stop_command_results": self.stop_command_results,
             "log_path": str(self.log_path) if self.log_path is not None else None,
         }
 
