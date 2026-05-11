@@ -536,6 +536,7 @@ class TuningSession:
         self._active_serial: serial.Serial | None = None
         self.baseline_parameters: dict[str, float] | None = None
         self.active_parameter_keys: list[str] | None = None
+        self.runtime_limit_overrides: dict[str, int | float] = {}
         self.touched_parameter_keys: set[str] = set()
         self.skipped_parameter_keys: set[str] = set()
         self.skipped_parameters: list[dict[str, Any]] = []
@@ -555,6 +556,7 @@ class TuningSession:
         self.baseline_score: float | None = None
         self.final_score: float | None = None
         self.log_path: Path | None = None
+        self._pending_log_records: list[dict[str, Any]] = []
 
     def _apply_stop_reason(self, reason: str) -> None:
         if reason == "operator_abort" or self.stop_reason == "max_rounds":
@@ -580,10 +582,18 @@ class TuningSession:
         event = TuningEvent(event_type, message, dict(data))
         if event_type == "state":
             event.data.setdefault("timestamp", event.timestamp)
-        if self.log_path is not None and event_type == "state":
-            log_record(self.log_path, event.to_record())
+        if self._should_log_event(event):
+            if self.log_path is not None:
+                log_record(self.log_path, event.to_record())
+            else:
+                self._pending_log_records.append(event.to_record())
         if self.event_handler is not None:
             self.event_handler(event)
+
+    def _should_log_event(self, event: TuningEvent) -> bool:
+        return event.type == "state" or (
+            event.type == "action" and event.data.get("action") == "set_runtime_limits"
+        )
 
     def _reject_action(self, action: str, code: str, message: str, **data: Any) -> ActionResult:
         result = ActionResult(
@@ -903,6 +913,117 @@ class TuningSession:
         )
         return result
 
+    def _yaml_runtime_limits(self) -> dict[str, int | float]:
+        return {
+            "max_rounds": int(self.plan["step_policy"]["max_rounds"]),
+            "trial_window_ms": float(self.plan["scoring"]["trial_window_ms"]),
+            "cooldown_ms": float(self.plan["step_policy"]["cooldown_ms"]),
+        }
+
+    def _effective_runtime_limits(self) -> dict[str, int | float]:
+        limits = self._yaml_runtime_limits()
+        limits.update(self.runtime_limit_overrides)
+        return limits
+
+    def set_runtime_limits(
+        self,
+        *,
+        max_rounds: int | None = None,
+        trial_window_ms: Number | None = None,
+        cooldown_ms: Number | None = None,
+    ) -> ActionResult:
+        if self.state != self.STATE_IDLE or self.log_path is not None:
+            return self._reject_action(
+                "set_runtime_limits",
+                "session_already_started",
+                "Runtime limits can only be overridden before the run starts.",
+            )
+
+        requested = {
+            "max_rounds": max_rounds,
+            "trial_window_ms": trial_window_ms,
+            "cooldown_ms": cooldown_ms,
+        }
+        requested = {key: value for key, value in requested.items() if value is not None}
+        if not requested:
+            return self._reject_action(
+                "set_runtime_limits",
+                "empty_runtime_limit_override",
+                "At least one runtime limit override is required.",
+            )
+
+        invalid_limits: dict[str, Any] = {}
+        normalized: dict[str, int | float] = {}
+        for key, value in requested.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                invalid_limits[key] = value
+                continue
+            if not math.isfinite(float(value)):
+                invalid_limits[key] = value
+                continue
+            if key == "max_rounds":
+                if int(value) != value or value < 0:
+                    invalid_limits[key] = value
+                    continue
+                normalized[key] = int(value)
+            else:
+                if value <= 0:
+                    invalid_limits[key] = value
+                    continue
+                normalized[key] = float(value)
+        if invalid_limits:
+            return self._reject_action(
+                "set_runtime_limits",
+                "invalid_runtime_limit",
+                "Runtime limit overrides must be numeric and within allowed ranges.",
+                invalid_runtime_limits=invalid_limits,
+            )
+
+        yaml_limits = self._yaml_runtime_limits()
+        exceeded_limits = {
+            key: {
+                "requested": value,
+                "yaml_limit": yaml_limits[key],
+            }
+            for key, value in normalized.items()
+            if value > yaml_limits[key]
+        }
+        if exceeded_limits:
+            return self._reject_action(
+                "set_runtime_limits",
+                "runtime_limit_exceeds_yaml",
+                "Runtime limit overrides cannot exceed YAML limits.",
+                exceeded_runtime_limits=exceeded_limits,
+                requested_runtime_limits=normalized,
+                yaml_runtime_limits=yaml_limits,
+            )
+
+        previous_overrides = dict(self.runtime_limit_overrides)
+        self.runtime_limit_overrides.update(normalized)
+        effective_limits = self._effective_runtime_limits()
+        result = ActionResult(
+            ok=True,
+            action="set_runtime_limits",
+            state=self.state,
+            message="Runtime limits overridden.",
+            data={
+                "runtime_limit_overrides": dict(self.runtime_limit_overrides),
+                "previous_runtime_limit_overrides": previous_overrides,
+                "requested_runtime_limits": dict(normalized),
+                "yaml_runtime_limits": yaml_limits,
+                "effective_runtime_limits": effective_limits,
+            },
+        )
+        self.emit(
+            "action",
+            result.message,
+            action="set_runtime_limits",
+            state=self.state,
+            session_id=self.session_id,
+            **result.data,
+        )
+        return result
+
     def _skip_reason_for(self, key: str) -> str:
         for record in self.skipped_parameters:
             if record["key"] == key:
@@ -1088,6 +1209,9 @@ class TuningSession:
             log_dir = self.plan_path.parent / "mcu_tuning_logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         self.log_path = log_dir / f"{self.session_id}.jsonl"
+        for record in self._pending_log_records:
+            log_record(self.log_path, record)
+        self._pending_log_records.clear()
         return self.log_path
 
     def execute_rollback(self, ser: serial.Serial, key: str, value: Number) -> CommandResult:
@@ -1159,7 +1283,7 @@ class TuningSession:
         commands = self.plan["commands"]
         transport = self.plan["transport"]
         scoring = self.plan["scoring"]
-        step_policy = self.plan["step_policy"]
+        runtime_limits = self._effective_runtime_limits()
 
         set_command = format_template(commands["set"], param["key"], trial_value)
         set_result = send_command(
@@ -1192,8 +1316,8 @@ class TuningSession:
             if not status_confirms_value(status.lines, readback_key, trial_value):
                 return TrialResult("rollback", None, None, ["readback_mismatch"], TelemetryResult([], 0, status.lines))
 
-        time.sleep(float(step_policy["cooldown_ms"]) / 1000.0)
-        telemetry = collect_telemetry(ser, self.plan, int(scoring["trial_window_ms"]), self.event_handler)
+        time.sleep(float(runtime_limits["cooldown_ms"]) / 1000.0)
+        telemetry = collect_telemetry(ser, self.plan, int(runtime_limits["trial_window_ms"]), self.event_handler)
         score, hard_failures = score_window(self.plan, telemetry)
         if score is None:
             return TrialResult("rollback", None, None, hard_failures, telemetry)
@@ -1222,6 +1346,7 @@ class TuningSession:
         commands = self.plan["commands"]
         scoring = self.plan["scoring"]
         step_policy = self.plan["step_policy"]
+        runtime_limits = self._effective_runtime_limits()
 
         self.emit("info", f"Opening serial port {transport['port']} @ {transport['baudrate']}...")
 
@@ -1296,7 +1421,7 @@ class TuningSession:
                     self._apply_stop_reason("manual_stop")
                     raise StopRequested()
                 parameter_order = self._tuning_parameter_order()
-                for round_index in range(1, int(step_policy["max_rounds"]) + 1):
+                for round_index in range(1, int(runtime_limits["max_rounds"]) + 1):
                     self._wait_if_paused()
                     if self.stop_requested:
                         self._apply_stop_reason("manual_stop")
@@ -1484,6 +1609,9 @@ class TuningSession:
             "failed": self.failed,
             "rolled_back": self.rolled_back,
             "active_parameter_keys": self._active_parameter_keys_for_summary(),
+            "runtime_limit_overrides": dict(self.runtime_limit_overrides),
+            "yaml_runtime_limits": self._yaml_runtime_limits(),
+            "effective_runtime_limits": self._effective_runtime_limits(),
             "touched_parameter_keys": [
                 key for key in self._parameter_keys_for_summary() if key in self.touched_parameter_keys
             ],

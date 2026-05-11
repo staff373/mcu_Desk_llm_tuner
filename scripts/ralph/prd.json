@@ -160,7 +160,7 @@
         "Tests pass for allowed reductions, rejected expansions, and recorded override metadata."
       ],
       "priority": 10,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

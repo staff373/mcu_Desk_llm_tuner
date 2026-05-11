@@ -14,6 +14,7 @@ Started: 2026-05-11 12:00:00
 - Stop-reason updates inside `TuningSession` should use `_apply_stop_reason(...)` so emergency `operator_abort` is not overwritten by generic manual-stop checkpoints.
 - Manual rollback controls require `baseline_parameters` and an active session serial handle; keep the missing-baseline guard before active-connection checks so invalid controls stay no-hardware.
 - Active parameter selection is session-scoped through `TuningSession.active_parameter_keys`; do not mutate `plan["step_policy"]["parameter_order"]` or source YAML-derived structures.
+- Runtime execution should read `max_rounds`, `trial_window_ms`, and `cooldown_ms` through `_effective_runtime_limits()` so session-scoped overrides do not mutate YAML-derived `plan`.
 
 ## 2026-05-11 12:14:10 - US-001
 - Implemented stable `TuningSessionState` values and readable `TuningSession.state`, initialized to `idle` without opening serial.
@@ -125,4 +126,16 @@ Started: 2026-05-11 12:00:00
 - Learnings for future iterations:
   - Active selection should be set before `run()` while the session is `idle`; later changes return `session_already_started`.
   - Summary `untouched_parameter_keys` excludes both touched keys and explicitly skipped keys, so unselected keys remain visible for GUI and report work.
+---
+
+## 2026-05-11 13:18:59 - US-010
+- Implemented `set_runtime_limits(...)` with structured action results for session-scoped reductions of `max_rounds`, `trial_window_ms`, and `cooldown_ms`.
+- The tuning loop now applies effective runtime limits without mutating source YAML-derived `plan`, rejects expansions before execution, and records override metadata as action events and JSONL records.
+- Files changed: `tuning_session.py`, `test_tuning_session_runtime_limits.py`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`, `project_status.md`, `.project_checkpoints/US-010/20260511-131656/`.
+- Verification commands and results: `python -m py_compile tuning_session.py test_tuning_session_runtime_limits.py` passed; `python -m unittest test_tuning_session_runtime_limits.py` passed with 2 tests; full session compile set passed; full session unittest set passed with 25 tests.
+- Checkpoint path: `.project_checkpoints/US-010/20260511-131656/`
+- Real serial status: not opened
+- Learnings for future iterations:
+  - Runtime limit overrides are stored in `TuningSession.runtime_limit_overrides` and surfaced through `summary()["runtime_limit_overrides"]`, `yaml_runtime_limits`, and `effective_runtime_limits`.
+  - Pre-run override action events are deferred until `log_path` exists so JSONL contains the metadata even when the action is emitted before `run()`.
 ---
