@@ -1,0 +1,178 @@
+# TEST-ONLY virtual fixture for no-hardware validation.
+# This plan is not evidence of a real MCU protocol and must not be used for
+# real serial acceptance.
+schema_version: 1
+plan_name: "test_only_virtual_no_hardware_pid_fixture"
+source:
+  project_path: "."
+  generated_from:
+    - "US-014 virtual plan fixture"
+    - "No-hardware regression validation"
+  confirmed_by_user:
+    - "TEST-ONLY fixture"
+    - "Uses a virtual transport label, not a real serial port"
+transport:
+  port: "VIRTUAL_NO_HARDWARE_TEST_ONLY"
+  baudrate: 115200
+  data_bits: 8
+  parity: "none"
+  stop_bits: 1
+  line_ending: "\n"
+  read_timeout_ms: 5
+  write_timeout_ms: 5
+commands:
+  set: "SET {key} {value}"
+  status: "STATUS"
+  telemetry_on: "TEL_ON"
+  telemetry_off: "TEL_OFF"
+  stop: "STOP"
+  ok_pattern: "OK"
+  error_patterns:
+    - "ERR"
+    - "FAIL"
+  readback_required: false
+parameters:
+  - key: "kp_x"
+    meaning: "TEST-ONLY proportional gain for the virtual x axis"
+    current: 1.0
+    min: 0.0
+    max: 3.0
+    initial_step: 0.1
+    max_delta_per_round: 0.25
+    runtime_safe: true
+    role: "primary"
+    group: "x_axis"
+    readback_key: "kp_x"
+    telemetry_effect_fields:
+      - "error_x"
+      - "pwm_x"
+  - key: "kd_x"
+    meaning: "TEST-ONLY derivative gain for the virtual x axis"
+    current: 0.2
+    min: 0.0
+    max: 1.0
+    initial_step: 0.05
+    max_delta_per_round: 0.1
+    runtime_safe: true
+    role: "secondary"
+    group: "x_axis"
+    readback_key: "kd_x"
+    telemetry_effect_fields:
+      - "error_x"
+      - "pwm_x"
+  - key: "kp_y"
+    meaning: "TEST-ONLY proportional gain for the virtual y axis"
+    current: 1.1
+    min: 0.0
+    max: 3.0
+    initial_step: 0.1
+    max_delta_per_round: 0.25
+    runtime_safe: true
+    role: "primary"
+    group: "y_axis"
+    readback_key: "kp_y"
+    telemetry_effect_fields:
+      - "error_y"
+      - "pwm_y"
+  - key: "kd_y"
+    meaning: "TEST-ONLY derivative gain for the virtual y axis"
+    current: 0.25
+    min: 0.0
+    max: 1.0
+    initial_step: 0.05
+    max_delta_per_round: 0.1
+    runtime_safe: true
+    role: "secondary"
+    group: "y_axis"
+    readback_key: "kd_y"
+    telemetry_effect_fields:
+      - "error_y"
+      - "pwm_y"
+telemetry:
+  format: "csv"
+  prefix: "DAT"
+  delimiter: ","
+  sample_period_ms: 20
+  malformed_policy: "mark_trial_failed"
+  fields:
+    - name: "error_x"
+      unit: "virtual_error"
+      type: "float"
+      scale: 1.0
+      role: "primary_score"
+    - name: "error_y"
+      unit: "virtual_error"
+      type: "float"
+      scale: 1.0
+      role: "primary_score"
+    - name: "pwm_x"
+      unit: "ratio"
+      type: "float"
+      scale: 1.0
+      role: "actuator_load"
+    - name: "pwm_y"
+      unit: "ratio"
+      type: "float"
+      scale: 1.0
+      role: "actuator_load"
+    - name: "lost"
+      unit: ""
+      type: "bool"
+      scale: 1.0
+      role: "safety"
+    - name: "sat"
+      unit: ""
+      type: "bool"
+      scale: 1.0
+      role: "safety"
+scoring:
+  lower_is_better: true
+  baseline_window_ms: 20
+  trial_window_ms: 20
+  metrics:
+    - "mean_abs(error_x)"
+    - "mean_abs(error_y)"
+    - "mean(pwm_x)"
+    - "mean(pwm_y)"
+    - "ratio_nonzero(lost)"
+    - "ratio_nonzero(sat)"
+  formula: "mean_abs(error_x) + mean_abs(error_y) + 0.1 * mean(pwm_x) + 0.1 * mean(pwm_y) + 10 * ratio_nonzero(lost) + 10 * ratio_nonzero(sat)"
+  accept_if_improvement_gte: 0.02
+  rollback_if_degradation_gte: 0.02
+  hard_failures:
+    - "ratio_nonzero(lost) > 0"
+    - "ratio_nonzero(sat) > 0"
+step_policy:
+  mode: "coordinate_descent"
+  parameter_order:
+    - "kp_x"
+    - "kd_x"
+    - "kp_y"
+    - "kd_y"
+  shrink_on_failure: 0.5
+  expand_on_success: true
+  max_rounds: 8
+  cooldown_ms: 1
+rollback:
+  baseline_source: "collected_virtual_baseline"
+  restore_target: "last_stable"
+  command_template: "RB {key} {value}"
+  confirm_with: "STATUS"
+  on_failure:
+    - "stop"
+    - "mark_session_error"
+stop_conditions:
+  success: "max_rounds_reached"
+  repeated_degradation: "rollback_threshold_reached"
+  communication_failure: "ok_timeout_or_missing_virtual_response"
+  unsafe_behavior: "lost_or_sat_reported"
+  manual_stop: "operator_or_agent_stop_requested"
+recording:
+  per_round_fields:
+    - "round"
+    - "changed_parameter"
+    - "score_before"
+    - "score_after"
+    - "decision"
+    - "rollback_status"
+  save_recommended: true

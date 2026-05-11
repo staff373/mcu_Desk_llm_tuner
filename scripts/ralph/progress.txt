@@ -181,3 +181,15 @@ Started: 2026-05-11 12:00:00
   - Virtual transport command recognition is derived from YAML templates, making future virtual plan fixtures reusable without adding a free-form serial path.
   - Patching `tuning_session.serial.Serial` to raise is a useful negative assertion that virtual no-hardware flows did not open COM8 or any real serial port.
 ---
+
+## 2026-05-11 13:50:09 - US-014
+- Added a test-only virtual YAML plan fixture that validates with `validate_plan.py`.
+- Added no-hardware fixture tests asserting the required virtual parameter keys, telemetry fields, test-only labeling, and absence of real COM8 usage.
+- Files changed: `fixtures/virtual_mcu_tuning_plan.yaml`, `test_virtual_plan_fixture.py`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`, `project_status.md`, `.project_checkpoints/US-014/20260511-134901/`.
+- Verification commands and results: `python -m py_compile validate_plan.py test_virtual_plan_fixture.py` passed; `python validate_plan.py .\fixtures\virtual_mcu_tuning_plan.yaml` passed with `RESULT: valid`; `python -m unittest test_virtual_plan_fixture.py` passed with 2 tests.
+- Checkpoint path: `.project_checkpoints/US-014/20260511-134901/`
+- Real serial status: not opened
+- Learnings for future iterations:
+  - The shared virtual fixture lives at `fixtures/virtual_mcu_tuning_plan.yaml` and uses `VIRTUAL_NO_HARDWARE_TEST_ONLY` as its transport port.
+  - Fixture validation should assert both schema validity and test-only labeling so virtual artifacts are not mistaken for real hardware evidence.
+---

@@ -224,7 +224,7 @@
         "Tests pass: python validate_plan.py <virtual_plan.yaml> exits 0."
       ],
       "priority": 14,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
