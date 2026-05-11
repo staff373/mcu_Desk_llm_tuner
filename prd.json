@@ -1,0 +1,435 @@
+{
+  "project": "MCU Desk LLM Tuner",
+  "branchName": "ralph/mcu-tuning-console-agent-control",
+  "description": "Upgrade the MCU Bluetooth/serial tuning panel into a YAML-bound tuning control console with controllable TuningSession state, virtual no-hardware agent validation, GUI integration, and repeatable verification.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "Session State Values",
+      "description": "As a control-console developer, I want TuningSession to expose stable state values so that GUI and agent clients can render the current phase without parsing human text.",
+      "acceptanceCriteria": [
+        "TuningSession exposes state values for idle, validating, connected, baseline, tuning, paused, rollback, stopping, stopped, and error.",
+        "State is readable without starting a real serial connection.",
+        "Initial state is idle before any validation or transport creation.",
+        "Terminal success state is stopped, and terminal failure state is error.",
+        "Typecheck passes: python -m py_compile tuning_session.py.",
+        "Tests pass for initial state, normal terminal state, and failure terminal state."
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "State Transition Events",
+      "description": "As an agent client, I want every state transition to emit a structured event so that automation can reconstruct the run timeline.",
+      "acceptanceCriteria": [
+        "Every state change emits event type state.",
+        "Each state event includes previous_state, next_state, reason, session_id, and timestamp.",
+        "State transitions are recorded in JSONL when logging is enabled.",
+        "A no-hardware test can assert the exact transition sequence for a virtual successful run.",
+        "Typecheck passes: python -m py_compile tuning_session.py.",
+        "Tests pass for transition ordering and required event fields."
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Invalid Control Guardrails",
+      "description": "As a console developer, I want invalid control calls to fail explicitly so that GUI and agent clients cannot silently corrupt session state.",
+      "acceptanceCriteria": [
+        "Calling resume() when not paused returns a structured rejected-action result.",
+        "Calling skip_current_param() when no current parameter is active returns a structured rejected-action result.",
+        "Calling rollback_to(...) before baseline exists returns a structured rejected-action result.",
+        "Rejected actions emit an error or action_rejected event with code, state, and action.",
+        "Typecheck passes: python -m py_compile tuning_session.py.",
+        "Tests pass for each invalid control call."
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Pause And Resume",
+      "description": "As an operator, I want to pause and resume a tuning session so that I can inspect state without ending the run.",
+      "acceptanceCriteria": [
+        "pause() moves the session to paused at a safe checkpoint and emits an action event.",
+        "resume() returns the session to the previous runnable state and emits an action event.",
+        "Pause does not send any YAML set command while paused.",
+        "Pause and resume are testable using virtual telemetry without sleeping for real trial windows.",
+        "Typecheck passes: python -m py_compile tuning_session.py.",
+        "Tests pass for pause before baseline, pause during tuning, and resume after pause."
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Safe Stop",
+      "description": "As an operator, I want stop to shut down telemetry safely so that the device is left in a predictable state.",
+      "acceptanceCriteria": [
+        "request_stop() moves the session toward stopping and then stopped.",
+        "If a connection exists, stop attempts YAML-defined telemetry_off before YAML-defined stop.",
+        "Stop emits tx events for attempted YAML stop commands.",
+        "Stop records whether each stop command succeeded, timed out, or was unavailable.",
+        "Typecheck passes: python -m py_compile tuning_session.py.",
+        "Tests pass for stopping before connection, after connection, and during virtual tuning."
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Emergency Stop",
+      "description": "As an operator, I want an emergency stop path so that a run can be marked as manually aborted and shutdown can be attempted immediately.",
+      "acceptanceCriteria": [
+        "Emergency stop is a separate action from normal stop and records stop_reason as an operator abort.",
+        "Emergency stop does not send arbitrary serial text.",
+        "Emergency stop uses only safe shutdown commands from YAML when a connection exists.",
+        "Emergency stop is available to GUI and agent control layers through the same session API.",
+        "Typecheck passes: python -m py_compile tuning_session.py tuning_panel.py.",
+        "Tests pass for emergency stop state, event fields, and summary output."
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "Skip Current Parameter",
+      "description": "As an operator, I want to skip the current parameter so that one unstable axis or key does not block the full run.",
+      "acceptanceCriteria": [
+        "skip_current_param() skips only the currently active parameter.",
+        "The skipped key and reason are emitted as an action event.",
+        "Skipping does not mutate the source YAML file.",
+        "Skipped parameters appear in the final summary and session report.",
+        "Typecheck passes: python -m py_compile tuning_session.py.",
+        "Tests pass for skip during tuning and rejected skip outside tuning."
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Rollback Targets",
+      "description": "As an operator, I want to roll back to last_stable or baseline so that manual intervention can restore a known safe parameter set.",
+      "acceptanceCriteria": [
+        "rollback_to('last_stable') restores the current last stable values through YAML rollback command templates.",
+        "rollback_to('baseline') restores baseline values through YAML rollback command templates.",
+        "Rollback emits one action event and per-command tx/rx events.",
+        "Rollback failure moves the session to error or a documented recoverable state.",
+        "Typecheck passes: python -m py_compile tuning_session.py.",
+        "Tests pass for both rollback targets, missing baseline rejection, and rollback command timeout."
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "Active Parameter Selection",
+      "description": "As an operator, I want to choose which parameters participate in this run so that I can tune one axis or a small parameter group.",
+      "acceptanceCriteria": [
+        "set_active_parameters([...]) accepts only keys declared in YAML.",
+        "Unknown keys are rejected before a run starts.",
+        "Active parameter selection is session-scoped and does not mutate source YAML.",
+        "Final summary lists active, skipped, and untouched parameters.",
+        "Typecheck passes: python -m py_compile tuning_session.py.",
+        "Tests pass for key filtering, unknown-key rejection, and no-mutation behavior."
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "Runtime Limit Overrides",
+      "description": "As an operator, I want to temporarily reduce runtime limits so that a supervised run can be shorter without weakening YAML safety limits.",
+      "acceptanceCriteria": [
+        "set_runtime_limits(...) can reduce max_rounds, trial_window_ms, and cooldown_ms for the current session.",
+        "Overrides that exceed YAML limits are rejected before execution.",
+        "Overrides are emitted as action events and recorded in JSONL.",
+        "Source YAML remains unchanged after overrides.",
+        "Typecheck passes: python -m py_compile tuning_session.py.",
+        "Tests pass for allowed reductions, rejected expansions, and recorded override metadata."
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-011",
+      "title": "Standardized Error Events",
+      "description": "As an agent client, I want execution failures to use stable machine-readable error fields so that automated control can distinguish recoverable failures from hard failures.",
+      "acceptanceCriteria": [
+        "Error events include category, code, message, recoverable, state, action, and optional context fields.",
+        "Supported categories include serial_exception, ok_timeout, readback_mismatch, malformed_telemetry, rollback_failed, and hard_failure.",
+        "Existing CLI output remains human-readable and includes the same error code where practical.",
+        "Error records in JSONL preserve the same category and code as emitted events.",
+        "Typecheck passes: python -m py_compile tuning_session.py run_tuning_plan.py.",
+        "Tests pass for each standardized error type using fake or virtual transport inputs."
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-012",
+      "title": "Transport Interface",
+      "description": "As a developer, I want a narrow transport interface so that real serial and virtual execution use the same session path.",
+      "acceptanceCriteria": [
+        "The transport interface supports write, readline, reset input buffer, close, and timeout behavior required by current session logic.",
+        "Real serial behavior remains available through a pyserial-backed transport.",
+        "Transport construction for real serial does not open COM8 during offline tests.",
+        "run_tuning_plan.py keeps its existing real-serial default behavior and CLI arguments.",
+        "Typecheck passes: python -m py_compile tuning_session.py run_tuning_plan.py.",
+        "Tests pass for interface conformance and real transport construction without opening a port."
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-013",
+      "title": "Virtual Transport",
+      "description": "As a tester, I want a virtual transport so that automatic tuning can be verified without real hardware.",
+      "acceptanceCriteria": [
+        "Virtual transport never opens COM8 or any real serial port.",
+        "Virtual transport responds to the same YAML command templates used by the session core.",
+        "Virtual transport emits realistic rx and dat behavior through the existing event pipeline.",
+        "Virtual transport is opt-in through tests or probe scripts, never implicit for real tuning.",
+        "Typecheck passes: python -m py_compile tuning_session.py.",
+        "Tests pass for virtual STATUS, SET, telemetry_on, telemetry_off, stop, and rollback flows."
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-014",
+      "title": "Virtual Plan Fixture",
+      "description": "As a tester, I want a virtual YAML plan fixture so that no-hardware verification is repeatable.",
+      "acceptanceCriteria": [
+        "Add a virtual plan fixture that validates with validate_plan.py.",
+        "Virtual parameter keys include kp_x, kd_x, kp_y, and kd_y.",
+        "Virtual telemetry includes error_x, error_y, pwm_x, pwm_y, lost, and sat.",
+        "The fixture is clearly labeled test-only and cannot be mistaken for a real COM8 plan.",
+        "Typecheck passes: python -m py_compile validate_plan.py.",
+        "Tests pass: python validate_plan.py <virtual_plan.yaml> exits 0."
+      ],
+      "priority": 14,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-015",
+      "title": "Virtual Scoring Behavior",
+      "description": "As a maintainer, I want virtual scoring to be deterministic but non-trivial so that accept, hold, and rollback paths are all exercised.",
+      "acceptanceCriteria": [
+        "Virtual telemetry improves as parameters approach deterministic target values.",
+        "At least one scripted run produces an accepted trial.",
+        "At least one scripted run produces hold or rollback.",
+        "Re-running the same virtual test produces the same final summary unless the fixture changes.",
+        "Typecheck passes: python -m py_compile tuning_session.py.",
+        "Tests pass for deterministic score progression and expected decision counts."
+      ],
+      "priority": 15,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-016",
+      "title": "Agent Control Facade",
+      "description": "As a Codex agent, I want a small control facade so that agent actions map to session APIs without reaching into GUI internals.",
+      "acceptanceCriteria": [
+        "The facade exposes load_plan, validate_plan, start_auto_tune, pause, resume, skip_current_param, rollback_to, stop, and export_session_report.",
+        "The facade refuses actions before the plan is validated.",
+        "The facade emits action results with ok, action, state, and optional error_code.",
+        "The facade never exposes arbitrary serial text sending.",
+        "Typecheck passes: python -m py_compile tuning_session.py agent_console_probe.py.",
+        "Tests pass for allowed actions, rejected actions, and event forwarding."
+      ],
+      "priority": 16,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-017",
+      "title": "Agent Console Probe CLI",
+      "description": "As a Codex agent, I want a standalone probe script so that agent-console connectivity can be verified in one command.",
+      "acceptanceCriteria": [
+        "Add agent_console_probe.py or an equivalent standalone script in the current script directory.",
+        "The probe runs without COM8 and without opening any real serial port.",
+        "The probe executes load, validate, start, pause, resume, skip, rollback, stop, and report export paths.",
+        "The probe exits non-zero if required structured events are missing.",
+        "Typecheck passes: python -m py_compile agent_console_probe.py tuning_session.py validate_plan.py.",
+        "Tests pass: the probe exits 0 in a no-hardware environment and writes its artifacts."
+      ],
+      "priority": 17,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-018",
+      "title": "Session Report Export",
+      "description": "As a maintainer, I want exported session reports so that virtual and real sessions can be reviewed after execution.",
+      "acceptanceCriteria": [
+        "Report export includes plan path, session id, action log, event counts, final summary, and generated artifact paths.",
+        "Report export includes a statement that virtual runs did not open real serial ports.",
+        "Report export can be generated after successful, stopped, and error sessions.",
+        "Report schema is documented or enforced by a lightweight validation test.",
+        "Typecheck passes: python -m py_compile agent_console_probe.py tuning_session.py.",
+        "Tests pass for report schema, required fields, and artifact existence."
+      ],
+      "priority": 18,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-019",
+      "title": "GUI Session Worker",
+      "description": "As an operator, I want the desktop panel to run automatic tuning through TuningSession directly so that the UI does not depend on parsing stdout.",
+      "acceptanceCriteria": [
+        "tuning_panel.py can start a TuningSession on a background thread for automatic tuning.",
+        "The Tkinter main thread consumes events through a queue and never performs blocking serial reads.",
+        "Existing subprocess mode remains available as fallback or compatibility path.",
+        "Runtime verification: python tuning_panel.py --self-test passes, and hidden GUI initialization succeeds in a no-hardware environment.",
+        "Typecheck passes: python -m py_compile tuning_panel.py tuning_session.py.",
+        "Tests pass for direct-session worker lifecycle and fallback mode selection."
+      ],
+      "priority": 19,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-020",
+      "title": "GUI Event Rendering",
+      "description": "As an operator, I want structured session events to update the correct GUI pages so that the panel reflects real session state.",
+      "acceptanceCriteria": [
+        "Monitor page displays tx, rx, and dat events from structured event data.",
+        "Tuning page displays baseline, round, decision, and summary events from structured event data.",
+        "History page displays record, warning, error, and summary events from structured event data.",
+        "Unknown event types are recorded safely without crashing the UI.",
+        "Runtime verification: GUI hidden initialization and a virtual event replay complete without errors.",
+        "Typecheck passes: python -m py_compile tuning_panel.py tuning_session.py.",
+        "Tests pass for event-to-page routing and unknown-event handling."
+      ],
+      "priority": 20,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-021",
+      "title": "GUI Operator Controls",
+      "description": "As an operator, I want GUI controls for observation, automatic tuning, pause, resume, skip, rollback, stop, and emergency stop so that I can supervise tuning without editing files.",
+      "acceptanceCriteria": [
+        "GUI includes buttons for start monitor, start auto tune, pause, resume, skip current parameter, rollback to last stable, rollback to baseline, stop, and emergency stop.",
+        "Buttons are enabled or disabled based on current session state.",
+        "Buttons call only TuningSession control APIs or YAML-declared commands through the session.",
+        "No free serial text box is added.",
+        "Runtime verification: desktop GUI self-test and hidden initialization pass.",
+        "Typecheck passes: python -m py_compile tuning_panel.py tuning_session.py.",
+        "Tests pass for state-based button enablement and control API dispatch using a fake session."
+      ],
+      "priority": 21,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-022",
+      "title": "Connection Management Page",
+      "description": "As an operator, I want a connection page so that serial configuration and connection state are visible before any real run starts.",
+      "acceptanceCriteria": [
+        "Connection view shows port, baudrate, connection state, detect ports, connect, and disconnect controls.",
+        "Port detection does not auto-connect or send any serial command.",
+        "Connection actions require a validated plan when using real transport.",
+        "No self-test or hidden initialization opens COM8.",
+        "Runtime verification: GUI hidden initialization opens the page without serial side effects.",
+        "Typecheck passes: python -m py_compile tuning_panel.py tuning_session.py.",
+        "Tests pass for no-auto-connect behavior and displayed YAML transport metadata."
+      ],
+      "priority": 22,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-023",
+      "title": "Parameter Page",
+      "description": "As an operator, I want a parameter page so that current, baseline, last stable, and trial values are visible and selectable.",
+      "acceptanceCriteria": [
+        "Parameter view shows current value, baseline, last stable, trial value, range, step, and participation state.",
+        "Parameter selection supports one axis, one parameter group, or specific keys for the current run only.",
+        "Selection controls reject keys not declared in YAML.",
+        "Selection changes do not mutate the source YAML file.",
+        "Runtime verification: virtual plan can populate the parameter page.",
+        "Typecheck passes: python -m py_compile tuning_panel.py tuning_session.py.",
+        "Tests pass for metadata loading, selection filtering, and no-mutation behavior."
+      ],
+      "priority": 23,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-024",
+      "title": "Safety And Command Preview",
+      "description": "As an operator, I want a safety and command preview view so that the next action is visible before the console sends YAML-derived commands.",
+      "acceptanceCriteria": [
+        "Safety view shows limits, stop conditions, communication timeout, and hard failure rules.",
+        "Triggered safety rules are highlighted from structured events.",
+        "Command preview shows the next YAML-derived command before it is sent.",
+        "Command preview never accepts user-entered free serial text.",
+        "Runtime verification: virtual session updates preview and safety state.",
+        "Typecheck passes: python -m py_compile tuning_panel.py tuning_session.py.",
+        "Tests pass for preview generation, safety event highlighting, and no free-text command path."
+      ],
+      "priority": 24,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-025",
+      "title": "Session Replay",
+      "description": "As an operator, I want to replay historical sessions so that I can compare tuning outcomes after a run.",
+      "acceptanceCriteria": [
+        "Session management creates a session id and saves YAML snapshot, JSONL, transcript, and final summary.",
+        "Replay view can load a historical session.",
+        "Replay view compares baseline score, final score, accepted count, rollback count, and final parameter differences.",
+        "Corrupt or partial session logs are reported as recoverable load errors.",
+        "Runtime verification: a virtual session can be exported and loaded in replay view.",
+        "Typecheck passes: python -m py_compile tuning_panel.py tuning_session.py.",
+        "Tests pass for session metadata loading, replay summary parsing, and corrupt-log handling."
+      ],
+      "priority": 25,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-026",
+      "title": "Regression Verification Harness",
+      "description": "As a maintainer, I want a repeatable no-hardware verification command or checklist so that future changes do not break CLI fallback, GUI startup, or virtual agent testing.",
+      "acceptanceCriteria": [
+        "Verification includes python -m py_compile for all relevant scripts.",
+        "Verification includes python validate_plan.py <virtual_plan.yaml>.",
+        "Verification includes python run_tuning_plan.py --help.",
+        "Verification includes python monitor_tuning_plan.py --help.",
+        "Verification includes python tuning_panel.py --self-test.",
+        "Verification includes GUI hidden initialization.",
+        "Verification includes virtual agent tuning probe.",
+        "Verification includes a negative assertion that COM8 or any real serial port was not opened.",
+        "Verification includes quick_validate.py mcu-bluetooth-executor when the global skill directory is in scope.",
+        "Verification cleans __pycache__ and temporary logs generated during the test run.",
+        "Typecheck passes: all relevant scripts compile.",
+        "Tests pass: no-hardware verification exits successfully and writes a concise verification summary."
+      ],
+      "priority": 26,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}
