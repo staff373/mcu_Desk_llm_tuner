@@ -90,6 +90,7 @@ class TuningPanel(tk.Tk):
         self.plan_status = tk.StringVar(value="未加载")
 
         self.plan: dict[str, Any] | None = None
+        self.session: Any | None = None
         self.proc: subprocess.Popen[str] | None = None
         self.reader_thread: threading.Thread | None = None
         self.output_queue: queue.Queue[str] = queue.Queue()
@@ -255,7 +256,8 @@ class TuningPanel(tk.Tk):
         ttk.Button(controls, text="选择文件", command=self.browse_plan).grid(row=0, column=2, padx=(0, 8))
         ttk.Button(controls, text="校验", command=self.validate_current_plan).grid(row=0, column=3, padx=(0, 8))
         ttk.Button(controls, text="启动", style="Accent.TButton", command=self.start).grid(row=0, column=4, padx=(0, 8))
-        ttk.Button(controls, text="停止", style="Danger.TButton", command=self.stop).grid(row=0, column=5)
+        ttk.Button(controls, text="停止", style="Danger.TButton", command=self.stop).grid(row=0, column=5, padx=(0, 8))
+        ttk.Button(controls, text="急停", style="Danger.TButton", command=self.emergency_stop).grid(row=0, column=6)
 
         mode_frame = ttk.Frame(controls, style="Card.TFrame")
         mode_frame.grid(row=1, column=1, sticky="w", padx=8, pady=(10, 0))
@@ -924,6 +926,22 @@ class TuningPanel(tk.Tk):
         self.status.set("已停止")
         self.stop_reason.set("手动停止")
         self._add_history_event("停止", "用户请求停止")
+        self._close_transcript_file()
+        self._refresh_tuning_tree()
+
+    def emergency_stop(self) -> None:
+        self.stop_requested = True
+        if self.session is not None and hasattr(self.session, "emergency_stop"):
+            self.session.emergency_stop()
+        if self.proc is not None:
+            try:
+                self.proc.terminate()
+            except Exception:
+                pass
+            self.proc = None
+        self.status.set("急停")
+        self.stop_reason.set("operator_abort")
+        self._add_history_event("急停", "operator_abort")
         self._close_transcript_file()
         self._refresh_tuning_tree()
 

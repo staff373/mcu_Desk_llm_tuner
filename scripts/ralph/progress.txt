@@ -11,6 +11,7 @@ Started: 2026-05-11 12:00:00
 - Session control APIs should return `ActionResult`; rejected controls emit `action_rejected` events with `action`, `code`, `error_code`, `state`, and `session_id`.
 - Pause/resume no-hardware tests can call `resume()` from the structured `paused` state event handler to avoid background thread timing sleeps while still exercising safe checkpoints.
 - Safe-stop command outcomes are stored on `TuningSession.stop_command_results` and included in `summary()["stop_command_results"]` with statuses such as `succeeded`, `timed_out`, and `unavailable`.
+- Stop-reason updates inside `TuningSession` should use `_apply_stop_reason(...)` so emergency `operator_abort` is not overwritten by generic manual-stop checkpoints.
 
 ## 2026-05-11 12:14:10 - US-001
 - Implemented stable `TuningSessionState` values and readable `TuningSession.state`, initialized to `idle` without opening serial.
@@ -71,4 +72,18 @@ Started: 2026-05-11 12:00:00
   - Stop-before-connection tests can patch `tuning_session.serial.Serial` with a constructor that raises and then call `request_stop()` plus `run()` to prove no serial port opens.
   - Stop-after-connection tests can request stop from the structured `connected` state event and assert the command list is exactly `TEL_OFF`, then `STOP`.
   - Stop-during-tuning tests can request stop from a `round` event to prove no further YAML `SET` command is sent after the stop request.
+---
+
+## 2026-05-11 12:47:08 - US-006
+- Implemented `TuningSession.emergency_stop()` and `request_emergency_stop()` as a separate structured control action that records `stop_reason` as `operator_abort`.
+- Emergency stop clears pause state, requests immediate controlled shutdown, and uses only existing YAML `telemetry_off` and `stop` commands when a connection exists.
+- Added a GUI emergency stop button and handler that calls the session API when a direct session is present, without adding any free-form serial command path.
+- Files changed: `tuning_session.py`, `tuning_panel.py`, `test_tuning_session_emergency_stop.py`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`, `project_status.md`, `.project_checkpoints/US-006/20260511-124512/`.
+- Verification commands and results: `python -m py_compile tuning_session.py tuning_panel.py test_tuning_session_emergency_stop.py` passed; `python -m unittest test_tuning_session_emergency_stop.py` passed with 3 tests; `python -m unittest test_tuning_session_emergency_stop.py test_tuning_session_safe_stop.py test_tuning_session_pause_resume.py test_tuning_session_invalid_controls.py test_tuning_session_state_events.py test_tuning_session_state.py` passed with 16 tests; `python tuning_panel.py --self-test` passed.
+- Checkpoint path: `.project_checkpoints/US-006/20260511-124512/`
+- Real serial status: not opened
+- Learnings for future iterations:
+  - Emergency stop should preserve `operator_abort` through later run-loop stop checkpoints and terminal summary generation.
+  - Active-run emergency stop can be tested from the structured `connected` state event and should send only `TEL_OFF`, then `STOP` from YAML.
+  - GUI controls can call `self.session.emergency_stop()` when future direct-session worker support is present while preserving current subprocess compatibility.
 ---

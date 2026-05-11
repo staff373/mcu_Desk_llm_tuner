@@ -96,7 +96,7 @@
         "Tests pass for emergency stop state, event fields, and summary output."
       ],
       "priority": 6,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

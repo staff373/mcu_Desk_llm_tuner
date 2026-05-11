@@ -550,6 +550,10 @@ class TuningSession:
         self.final_score: float | None = None
         self.log_path: Path | None = None
 
+    def _apply_stop_reason(self, reason: str) -> None:
+        if reason == "operator_abort" or self.stop_reason == "max_rounds":
+            self.stop_reason = reason
+
     def _set_state(self, state: str, reason: str) -> None:
         if state not in self.STATE_VALUES:
             raise ValueError(f"unknown tuning session state: {state}")
@@ -641,8 +645,7 @@ class TuningSession:
             )
 
     def _finish_without_connection(self, log_path: Path, reason: str) -> int:
-        if self.stop_reason == "max_rounds":
-            self.stop_reason = "manual_stop"
+        self._apply_stop_reason("manual_stop")
         self._record_unavailable_stop_commands("no_connection")
         if self.state != self.STATE_STOPPED:
             if self.state != self.STATE_STOPPING:
@@ -659,8 +662,8 @@ class TuningSession:
         self.stop_requested = True
         self.pause_requested = False
         self._paused_return_state = None
-        if previous_state not in {self.STATE_STOPPED, self.STATE_ERROR} and self.stop_reason == "max_rounds":
-            self.stop_reason = "manual_stop"
+        if previous_state not in {self.STATE_STOPPED, self.STATE_ERROR}:
+            self._apply_stop_reason("manual_stop")
         self.emit(
             "action",
             "Stop requested.",
@@ -685,6 +688,46 @@ class TuningSession:
                 "already_requested": already_requested,
             },
         )
+
+    def emergency_stop(self) -> ActionResult:
+        previous_state = self.state
+        already_requested = self.stop_requested or self.state in {self.STATE_STOPPING, self.STATE_STOPPED}
+        self.stop_requested = True
+        self.pause_requested = False
+        self._paused_return_state = None
+        if previous_state not in {self.STATE_STOPPED, self.STATE_ERROR}:
+            self._apply_stop_reason("operator_abort")
+        self.emit(
+            "action",
+            "Emergency stop requested.",
+            action="emergency_stop",
+            state=previous_state,
+            session_id=self.session_id,
+            already_requested=already_requested,
+            stop_reason=self.stop_reason,
+            emergency=True,
+        )
+        if previous_state == self.STATE_IDLE:
+            self._set_state(self.STATE_STOPPING, "emergency_stop_requested")
+            self._record_unavailable_stop_commands("no_connection")
+            self._set_state(self.STATE_STOPPED, "emergency_stop_completed_without_connection")
+        elif previous_state not in {self.STATE_STOPPING, self.STATE_STOPPED, self.STATE_ERROR}:
+            self._set_state(self.STATE_STOPPING, "emergency_stop_requested")
+        return ActionResult(
+            ok=True,
+            action="emergency_stop",
+            state=self.state,
+            message="Emergency stop requested.",
+            data={
+                "previous_state": previous_state,
+                "already_requested": already_requested,
+                "stop_reason": self.stop_reason,
+                "emergency": True,
+            },
+        )
+
+    def request_emergency_stop(self) -> ActionResult:
+        return self.emergency_stop()
 
     def pause(self) -> ActionResult:
         if self.state in {self.STATE_STOPPING, self.STATE_STOPPED, self.STATE_ERROR}:
@@ -969,13 +1012,13 @@ class TuningSession:
             try:
                 self._wait_if_paused()
                 if self.stop_requested:
-                    self.stop_reason = "manual_stop"
+                    self._apply_stop_reason("manual_stop")
                     raise StopRequested()
 
                 self._set_state(self.STATE_BASELINE, "baseline_started")
                 self._wait_if_paused()
                 if self.stop_requested:
-                    self.stop_reason = "manual_stop"
+                    self._apply_stop_reason("manual_stop")
                     raise StopRequested()
 
                 self.emit("info", f"Collecting baseline for {scoring['baseline_window_ms']} ms...")
@@ -996,18 +1039,18 @@ class TuningSession:
                     },
                 )
                 if self.stop_requested:
-                    self.stop_reason = "manual_stop"
+                    self._apply_stop_reason("manual_stop")
                     raise StopRequested()
 
                 self._set_state(self.STATE_TUNING, "baseline_complete")
                 if self.stop_requested:
-                    self.stop_reason = "manual_stop"
+                    self._apply_stop_reason("manual_stop")
                     raise StopRequested()
                 parameter_order = step_policy["parameter_order"]
                 for round_index in range(1, int(step_policy["max_rounds"]) + 1):
                     self._wait_if_paused()
                     if self.stop_requested:
-                        self.stop_reason = "manual_stop"
+                        self._apply_stop_reason("manual_stop")
                         break
 
                     key = parameter_order[(round_index - 1) % len(parameter_order)]
@@ -1024,14 +1067,14 @@ class TuningSession:
                     self._wait_if_paused()
                     if self.stop_requested:
                         self.current_parameter_key = None
-                        self.stop_reason = "manual_stop"
+                        self._apply_stop_reason("manual_stop")
                         break
 
                     before_params = dict(self.current)
                     trial = self.run_trial(ser, param, trial_value, self.baseline_score)
                     self.current_parameter_key = None
                     if self.stop_requested:
-                        self.stop_reason = "manual_stop"
+                        self._apply_stop_reason("manual_stop")
                         break
 
                     rollback_status = "not_needed"
@@ -1115,13 +1158,13 @@ class TuningSession:
                         self.stop_reason = "hard_failure"
                         break
                     if self.stop_requested:
-                        self.stop_reason = "manual_stop"
+                        self._apply_stop_reason("manual_stop")
                         break
                 else:
                     self.stop_reason = "max_rounds"
 
             except StopRequested:
-                self.stop_reason = "manual_stop"
+                self._apply_stop_reason("manual_stop")
             except KeyboardInterrupt:
                 self.stop_reason = "user_interrupt"
                 self.emit("info", "User interrupt received; stopping and preserving last stable parameters.")
@@ -1133,7 +1176,7 @@ class TuningSession:
         summary = self.summary()
         log_record(log_path, {"summary": summary})
         self.emit("summary", "", summary=summary)
-        exit_code = 0 if self.stop_reason in {"max_rounds", "user_interrupt", "manual_stop"} else 1
+        exit_code = 0 if self.stop_reason in {"max_rounds", "user_interrupt", "manual_stop", "operator_abort"} else 1
         terminal_state = self.STATE_STOPPED if exit_code == 0 else self.STATE_ERROR
         terminal_reason = "run_completed" if exit_code == 0 else "run_failed"
         self._set_state(terminal_state, terminal_reason)
