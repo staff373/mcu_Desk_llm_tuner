@@ -144,7 +144,7 @@
         "Tests pass for key filtering, unknown-key rejection, and no-mutation behavior."
       ],
       "priority": 9,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

@@ -13,6 +13,7 @@ Started: 2026-05-11 12:00:00
 - Safe-stop command outcomes are stored on `TuningSession.stop_command_results` and included in `summary()["stop_command_results"]` with statuses such as `succeeded`, `timed_out`, and `unavailable`.
 - Stop-reason updates inside `TuningSession` should use `_apply_stop_reason(...)` so emergency `operator_abort` is not overwritten by generic manual-stop checkpoints.
 - Manual rollback controls require `baseline_parameters` and an active session serial handle; keep the missing-baseline guard before active-connection checks so invalid controls stay no-hardware.
+- Active parameter selection is session-scoped through `TuningSession.active_parameter_keys`; do not mutate `plan["step_policy"]["parameter_order"]` or source YAML-derived structures.
 
 ## 2026-05-11 12:14:10 - US-001
 - Implemented stable `TuningSessionState` values and readable `TuningSession.state`, initialized to `idle` without opening serial.
@@ -112,4 +113,16 @@ Started: 2026-05-11 12:00:00
 - Learnings for future iterations:
   - Manual rollback tests can invoke `rollback_to(...)` from structured `decision` or `baseline` events while fake serial is active.
   - Timeout rollback should set `stop_reason` to `rollback_failed`, request controlled shutdown, and leave the terminal state as `error`.
+---
+
+## 2026-05-11 13:09:24 - US-009
+- Implemented `set_active_parameters([...])` with structured action results, idle-only selection, unknown-key rejection, and session-scoped active key storage.
+- The tuning loop now uses active parameter filtering without mutating source YAML-derived `plan`, and final summary includes active, touched, skipped, and untouched parameter key lists.
+- Files changed: `tuning_session.py`, `test_tuning_session_active_parameters.py`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`, `project_status.md`, `.project_checkpoints/US-009/20260511-130924/`.
+- Verification commands and results: `python -m py_compile tuning_session.py test_tuning_session_active_parameters.py` passed; `python -m unittest test_tuning_session_active_parameters.py` passed with 2 tests; full session unittest set passed with 23 tests.
+- Checkpoint path: `.project_checkpoints/US-009/20260511-130924/`
+- Real serial status: not opened
+- Learnings for future iterations:
+  - Active selection should be set before `run()` while the session is `idle`; later changes return `session_already_started`.
+  - Summary `untouched_parameter_keys` excludes both touched keys and explicitly skipped keys, so unselected keys remain visible for GUI and report work.
 ---

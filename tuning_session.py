@@ -535,6 +535,8 @@ class TuningSession:
         self.current_round_index: int | None = None
         self._active_serial: serial.Serial | None = None
         self.baseline_parameters: dict[str, float] | None = None
+        self.active_parameter_keys: list[str] | None = None
+        self.touched_parameter_keys: set[str] = set()
         self.skipped_parameter_keys: set[str] = set()
         self.skipped_parameters: list[dict[str, Any]] = []
 
@@ -789,6 +791,117 @@ class TuningSession:
             message="Resume requested.",
             data={"previous_state": paused_state},
         )
+
+    def _parameter_keys_for_summary(self) -> list[str]:
+        keys: list[str] = []
+        for key in self.plan["step_policy"].get("parameter_order", []):
+            if key in self.parameters and key not in keys:
+                keys.append(key)
+        for key in self.parameters:
+            if key not in keys:
+                keys.append(key)
+        return keys
+
+    def _tuning_parameter_order(self) -> list[str]:
+        default_order = [
+            key
+            for key in self.plan["step_policy"].get("parameter_order", [])
+            if key in self.parameters
+        ]
+        if self.active_parameter_keys is None:
+            return default_order
+
+        selected = set(self.active_parameter_keys)
+        order = [key for key in default_order if key in selected]
+        for key in self.active_parameter_keys:
+            if key not in order:
+                order.append(key)
+        return order
+
+    def _active_parameter_keys_for_summary(self) -> list[str]:
+        return self._tuning_parameter_order()
+
+    def _untouched_parameter_keys_for_summary(self) -> list[str]:
+        skipped = set(self.skipped_parameter_keys)
+        touched = set(self.touched_parameter_keys)
+        return [
+            key
+            for key in self._parameter_keys_for_summary()
+            if key not in touched and key not in skipped
+        ]
+
+    def set_active_parameters(self, keys: list[str]) -> ActionResult:
+        if self.state != self.STATE_IDLE or self.log_path is not None:
+            return self._reject_action(
+                "set_active_parameters",
+                "session_already_started",
+                "Active parameters can only be selected before the run starts.",
+            )
+        if isinstance(keys, str) or not isinstance(keys, (list, tuple)):
+            return self._reject_action(
+                "set_active_parameters",
+                "invalid_active_parameter_selection",
+                "Active parameter selection must be a list of parameter keys.",
+            )
+
+        normalized: list[str] = []
+        invalid_keys: list[Any] = []
+        for key in keys:
+            if not isinstance(key, str) or not key:
+                invalid_keys.append(key)
+                continue
+            if key not in normalized:
+                normalized.append(key)
+        if invalid_keys:
+            return self._reject_action(
+                "set_active_parameters",
+                "invalid_parameter_key",
+                "Active parameter keys must be non-empty strings.",
+                invalid_parameter_keys=invalid_keys,
+            )
+        if not normalized:
+            return self._reject_action(
+                "set_active_parameters",
+                "empty_active_parameter_selection",
+                "At least one active parameter must be selected.",
+            )
+
+        unknown_keys = [key for key in normalized if key not in self.parameters]
+        if unknown_keys:
+            return self._reject_action(
+                "set_active_parameters",
+                "unknown_parameter_key",
+                "Active parameter selection includes keys that are not declared in YAML.",
+                unknown_parameter_keys=unknown_keys,
+                declared_parameter_keys=self._parameter_keys_for_summary(),
+            )
+
+        previous_keys = self._active_parameter_keys_for_summary()
+        self.active_parameter_keys = list(normalized)
+        active_keys = self._active_parameter_keys_for_summary()
+        untouched_keys = self._untouched_parameter_keys_for_summary()
+        result = ActionResult(
+            ok=True,
+            action="set_active_parameters",
+            state=self.state,
+            message="Active parameters selected.",
+            data={
+                "active_parameter_keys": active_keys,
+                "previous_active_parameter_keys": previous_keys,
+                "untouched_parameter_keys": untouched_keys,
+            },
+        )
+        self.emit(
+            "action",
+            result.message,
+            action="set_active_parameters",
+            state=self.state,
+            session_id=self.session_id,
+            active_parameter_keys=active_keys,
+            previous_active_parameter_keys=previous_keys,
+            untouched_parameter_keys=untouched_keys,
+        )
+        return result
 
     def _skip_reason_for(self, key: str) -> str:
         for record in self.skipped_parameters:
@@ -1182,7 +1295,7 @@ class TuningSession:
                 if self.stop_requested:
                     self._apply_stop_reason("manual_stop")
                     raise StopRequested()
-                parameter_order = list(step_policy["parameter_order"])
+                parameter_order = self._tuning_parameter_order()
                 for round_index in range(1, int(step_policy["max_rounds"]) + 1):
                     self._wait_if_paused()
                     if self.stop_requested:
@@ -1246,6 +1359,7 @@ class TuningSession:
                         break
 
                     before_params = dict(self.current)
+                    self.touched_parameter_keys.add(key)
                     trial = self.run_trial(ser, param, trial_value, self.baseline_score)
                     self.current_parameter_key = None
                     self.current_round_index = None
@@ -1369,8 +1483,13 @@ class TuningSession:
             "held": self.held,
             "failed": self.failed,
             "rolled_back": self.rolled_back,
+            "active_parameter_keys": self._active_parameter_keys_for_summary(),
+            "touched_parameter_keys": [
+                key for key in self._parameter_keys_for_summary() if key in self.touched_parameter_keys
+            ],
             "skipped_parameters": self.skipped_parameters,
             "skipped_parameter_keys": sorted(self.skipped_parameter_keys),
+            "untouched_parameter_keys": self._untouched_parameter_keys_for_summary(),
             "stop_reason": self.stop_reason,
             "stop_command_results": self.stop_command_results,
             "log_path": str(self.log_path) if self.log_path is not None else None,
