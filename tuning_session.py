@@ -327,6 +327,206 @@ class PySerialTransport:
         self.close()
 
 
+def _parameter_command_pattern(template: str, parameter_keys: list[str]) -> re.Pattern[str]:
+    key_pattern = "|".join(re.escape(key) for key in sorted(parameter_keys, key=len, reverse=True))
+    if not key_pattern:
+        key_pattern = r"[^\s]+"
+    value_pattern = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
+    pattern = re.escape(template)
+    pattern = pattern.replace(r"\{key\}", f"(?P<key>{key_pattern})")
+    pattern = pattern.replace(r"\{value\}", f"(?P<value>{value_pattern})")
+    return re.compile(f"^{pattern}$")
+
+
+class VirtualTransport:
+    """Deterministic no-hardware transport for tests and probe scripts."""
+
+    def __init__(
+        self,
+        plan: dict[str, Any],
+        *,
+        target_parameters: dict[str, Number] | None = None,
+        samples_per_window: int = 3,
+    ) -> None:
+        self.plan = plan
+        self.timeout = float(plan["transport"]["read_timeout_ms"]) / 1000.0
+        self.write_timeout = float(plan["transport"]["write_timeout_ms"]) / 1000.0
+        self.opened = False
+        self.closed = False
+        self.telemetry_enabled = False
+        self.samples_per_window = max(1, int(samples_per_window))
+        self.commands: list[str] = []
+        self.pending_lines: list[bytes] = []
+        self.telemetry_lines: list[bytes] = []
+        self.parameters = {
+            param["key"]: float(param["current"])
+            for param in plan.get("parameters", [])
+        }
+        self.target_parameters = dict(target_parameters or self.parameters)
+        parameter_keys = list(self.parameters)
+        self._set_pattern = _parameter_command_pattern(plan["commands"]["set"], parameter_keys)
+        self._rollback_pattern = _parameter_command_pattern(plan["rollback"]["command_template"], parameter_keys)
+
+    @classmethod
+    def factory(
+        cls,
+        plan: dict[str, Any],
+        **kwargs: Any,
+    ) -> TransportFactory:
+        return lambda _transport: cls(plan, **kwargs)
+
+    def open(self) -> "VirtualTransport":
+        self.opened = True
+        self.closed = False
+        return self
+
+    def reset_input_buffer(self) -> None:
+        self.pending_lines.clear()
+        self.telemetry_lines.clear()
+
+    def write(self, payload: bytes) -> int:
+        command = payload.decode("utf-8", errors="replace").strip()
+        self.commands.append(command)
+        self._handle_command(command)
+        return len(payload)
+
+    def flush(self) -> None:
+        return None
+
+    def readline(self) -> bytes:
+        if self.pending_lines:
+            return self.pending_lines.pop(0)
+        if self.telemetry_lines:
+            return self.telemetry_lines.pop(0)
+        return b""
+
+    def close(self) -> None:
+        self.closed = True
+
+    def __enter__(self) -> "VirtualTransport":
+        return self.open()
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.close()
+
+    def _handle_command(self, command: str) -> None:
+        commands = self.plan["commands"]
+        if command == commands["status"]:
+            self._queue_ok(self._status_payload())
+            if self.telemetry_enabled:
+                self._queue_telemetry_window()
+            return
+        if command == commands["telemetry_on"]:
+            self.telemetry_enabled = True
+            self._queue_ok()
+            self._queue_telemetry_window()
+            return
+        if command == commands["telemetry_off"]:
+            self.telemetry_enabled = False
+            self._queue_ok()
+            return
+        if command == commands["stop"]:
+            self._queue_ok()
+            return
+
+        if self._apply_parameter_command(command, self._set_pattern):
+            self._queue_ok()
+            if self.telemetry_enabled:
+                self._queue_telemetry_window()
+            return
+        if self._apply_parameter_command(command, self._rollback_pattern):
+            self._queue_ok()
+            if self.telemetry_enabled:
+                self._queue_telemetry_window()
+            return
+
+        error_patterns = commands.get("error_patterns") or ["ERR"]
+        self._queue_line(f"{error_patterns[0]} unknown command: {command}")
+
+    def _apply_parameter_command(self, command: str, pattern: re.Pattern[str]) -> bool:
+        match = pattern.match(command)
+        if not match:
+            return False
+        key = match.group("key")
+        value = float(match.group("value"))
+        if key not in self.parameters:
+            return False
+        self.parameters[key] = value
+        return True
+
+    def _queue_ok(self, suffix: str = "") -> None:
+        ok_pattern = self.plan["commands"].get("ok_pattern") or "OK"
+        line = ok_pattern if not suffix else f"{ok_pattern} {suffix}"
+        self._queue_line(line)
+
+    def _queue_line(self, line: str) -> None:
+        self.pending_lines.append(f"{line}\n".encode("utf-8"))
+
+    def _status_payload(self) -> str:
+        return " ".join(f"{key}={value:g}" for key, value in self.parameters.items())
+
+    def _queue_telemetry_window(self) -> None:
+        if self.plan["telemetry"]["format"] != "csv":
+            return
+        for sample_index in range(self.samples_per_window):
+            self.telemetry_lines.append(self._format_telemetry_line(sample_index))
+
+    def _format_telemetry_line(self, sample_index: int) -> bytes:
+        telemetry = self.plan["telemetry"]
+        delimiter = telemetry.get("delimiter", ",")
+        values = [
+            self._format_telemetry_value(
+                self._telemetry_value(str(field["name"]), sample_index),
+                str(field.get("type", "float")),
+            )
+            for field in telemetry["fields"]
+        ]
+        body = delimiter.join(values)
+        prefix = telemetry.get("prefix")
+        line = f"{prefix}{delimiter}{body}" if prefix else body
+        return f"{line}\n".encode("utf-8")
+
+    def _telemetry_value(self, field_name: str, sample_index: int) -> Number | bool:
+        normalized = field_name.lower()
+        if normalized in {"lost", "sat", "saturated"}:
+            return False
+        if "pwm" in normalized:
+            return min(1.0, 0.2 + self._axis_error(normalized) * 10.0)
+        if "error" in normalized:
+            return self._axis_error(normalized) + sample_index * 0.001
+        if normalized in self.parameters:
+            return self.parameters[normalized]
+        return self._overall_error() + sample_index * 0.001
+
+    def _axis_error(self, field_name: str) -> float:
+        suffix = field_name.rsplit("_", 1)[-1] if "_" in field_name else ""
+        matching_keys = [
+            key
+            for key in self.parameters
+            if suffix and key.lower().endswith(f"_{suffix}")
+        ]
+        if not matching_keys:
+            return self._overall_error()
+        return sum(self._parameter_error(key) for key in matching_keys) / len(matching_keys)
+
+    def _overall_error(self) -> float:
+        if not self.parameters:
+            return 0.0
+        return sum(self._parameter_error(key) for key in self.parameters) / len(self.parameters)
+
+    def _parameter_error(self, key: str) -> float:
+        target = float(self.target_parameters.get(key, self.parameters[key]))
+        return abs(float(self.parameters[key]) - target)
+
+    def _format_telemetry_value(self, value: Number | bool, field_type: str) -> str:
+        normalized_type = field_type.lower()
+        if normalized_type in {"bool", "boolean"}:
+            return "1" if bool(value) else "0"
+        if normalized_type in {"int", "integer"}:
+            return str(int(round(float(value))))
+        return f"{float(value):.6g}"
+
+
 def encode_command(command: str, line_ending: str) -> bytes:
     return f"{command}{line_ending}".encode("utf-8")
 

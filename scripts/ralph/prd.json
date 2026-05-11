@@ -208,7 +208,7 @@
         "Tests pass for virtual STATUS, SET, telemetry_on, telemetry_off, stop, and rollback flows."
       ],
       "priority": 13,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

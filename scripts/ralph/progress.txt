@@ -17,6 +17,7 @@ Started: 2026-05-11 12:00:00
 - Runtime execution should read `max_rounds`, `trial_window_ms`, and `cooldown_ms` through `_effective_runtime_limits()` so session-scoped overrides do not mutate YAML-derived `plan`.
 - Standardized session failures should emit `error` events with `category`, `code`, `error_code`, `recoverable`, `state`, `action`, and `session_id`; these events are also JSONL records.
 - Real serial access in `TuningSession` now goes through `PySerialTransport.from_config`; constructing the transport is side-effect free, and no-hardware tests can inject `transport_factory` instead of patching GUI or CLI layers.
+- Virtual no-hardware flows should inject `VirtualTransport` through `TuningSession.transport_factory`; it is opt-in and never selected by port name or CLI defaults.
 
 ## 2026-05-11 12:14:10 - US-001
 - Implemented stable `TuningSessionState` values and readable `TuningSession.state`, initialized to `idle` without opening serial.
@@ -166,4 +167,17 @@ Started: 2026-05-11 12:00:00
   - Use `transport_factory` injection for future virtual transport and agent tests instead of patching higher-level session logic.
   - `PySerialTransport.from_config(...)` is safe to construct in offline tests; only `.open()` calls `serial.Serial(...)`.
   - Keep CLI defaults pointed at pyserial by leaving `execute_plan(...)` and `run_tuning_plan.py` without new required arguments.
+---
+
+## 2026-05-11 13:43:09 - US-013
+- Implemented an explicit opt-in `VirtualTransport` that recognizes YAML `status`, `set`, `telemetry_on`, `telemetry_off`, `stop`, and `rollback.command_template` commands.
+- Added deterministic virtual telemetry lines that flow through the existing `rx` and `dat` event pipeline and no-hardware tests proving `serial.Serial` is not opened.
+- Files changed: `tuning_session.py`, `test_tuning_session_virtual_transport.py`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`, `project_status.md`, `.project_checkpoints/US-013/20260511-134043/`.
+- Verification commands and results: `python -m py_compile tuning_session.py test_tuning_session_virtual_transport.py` passed; `python -m unittest test_tuning_session_virtual_transport.py` passed with 2 tests; `python -m unittest discover -p "test_tuning_session*.py"` passed with 36 tests; `python run_tuning_plan.py --help` passed; `python monitor_tuning_plan.py --help` passed.
+- Checkpoint path: `.project_checkpoints/US-013/20260511-134043/`
+- Real serial status: not opened
+- Learnings for future iterations:
+  - `VirtualTransport` should be passed explicitly through `transport_factory` or `VirtualTransport.factory(plan)` so real CLI behavior remains pyserial-backed.
+  - Virtual transport command recognition is derived from YAML templates, making future virtual plan fixtures reusable without adding a free-form serial path.
+  - Patching `tuning_session.serial.Serial` to raise is a useful negative assertion that virtual no-hardware flows did not open COM8 or any real serial port.
 ---
