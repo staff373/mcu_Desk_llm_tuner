@@ -1,0 +1,22 @@
+MCU 蓝牙调参控制台本地目录
+
+主界面:
+- 启动控制台.cmd
+- tuning_panel.py
+
+常用入口:
+- 演示模式.cmd: 不打开真实串口，自动播放演示数据。
+- 使用YAML自动调参.cmd: 将 mcu_tuning_plan.yaml 拖到该文件上，加载后自动进入自动调参模式。
+- 使用YAML观测.cmd: 将 mcu_tuning_plan.yaml 拖到该文件上，加载后自动进入观测模式。
+
+核心源码:
+- tuning_session.py: 调参会话核心，后续 GUI 和 agent 控制都应接这里。
+- run_tuning_plan.py: 命令行自动调参入口。
+- monitor_tuning_plan.py: 命令行观测入口。
+- validate_plan.py: YAML 离线校验入口。
+- launch_tuning_window.py: 独立控制台窗口入口。
+
+说明:
+- 当前目录是本地独立可运行副本。
+- 原 Codex skill 目录仍保留在 C:\Users\1\.codex\skills\mcu-bluetooth-executor，避免破坏全局 skill 发现。
+- 默认不要打开真实 COM 口；只有使用真实 YAML 并启动观测/自动调参时才会按 YAML 打开串口。

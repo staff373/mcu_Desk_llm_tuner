@@ -1,0 +1,27 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments and local tooling caches
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime logs and generated session artifacts
+*.log
+*.jsonl
+logs/
+tuning_logs/
+sessions/
+reports/
+
+# Local rollback checkpoints created from project_status.md
+.project_checkpoints/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+desktop.ini
