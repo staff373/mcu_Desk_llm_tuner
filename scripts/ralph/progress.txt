@@ -1,0 +1,10 @@
+# Ralph Progress Log
+Started: 2026-05-11 12:00:00
+---
+
+## Codebase Patterns
+- Active Ralph execution files live under `scripts/ralph/`: `prd.json`, `progress.txt`, `CODEX.md`, and `archive/`.
+- Each Story must update `project_status.md`, create a checkpoint under `.project_checkpoints/`, commit, and push.
+- Current phase is no-hardware: do not open COM8 or any real serial port during default verification.
+- Real serial commands must come only from YAML or validated `TuningSession` control flow.
+

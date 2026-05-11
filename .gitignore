@@ -21,6 +21,10 @@ reports/
 # Local rollback checkpoints created from project_status.md
 .project_checkpoints/
 
+# Ralph runner local state
+scripts/ralph/.last-branch
+scripts/ralph/.ralph-codex-window.pid
+
 # OS/editor noise
 .DS_Store
 Thumbs.db

@@ -4,6 +4,10 @@ Last updated: 2026-05-11
 
 Source PRD: `tasks/prd-mcu-tuning-console-agent-control.md`
 
+Ralph execution PRD: `scripts/ralph/prd.json`
+
+Ralph progress: `scripts/ralph/progress.txt`
+
 Workspace: `E:\本地控制调参器`
 
 Current policy: no real hardware acceptance in this phase. Do not open COM8, do not require Bluetooth hardware, and do not infer real MCU protocol facts from virtual fixtures.
@@ -111,8 +115,11 @@ Get-FileHash -Algorithm SHA256 "tuning_session.py" | Format-List | Out-File "$ro
 
 | Item | State |
 | --- | --- |
-| Project type | Local script copy, not a git repository |
+| Project type | Git repository with project-local Ralph workspace |
 | PRD exists | yes |
+| Ralph workspace | `scripts/ralph/` |
+| Ralph execution PRD | `scripts/ralph/prd.json` |
+| Ralph progress log | `scripts/ralph/progress.txt` |
 | Status ledger exists | yes |
 | Real hardware required | no |
 | Real COM8 validation | deferred |
@@ -124,6 +131,7 @@ Get-FileHash -Algorithm SHA256 "tuning_session.py" | Format-List | Out-File "$ro
 | Date | Story | Status | Changed Files | Verification | Checkpoint | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
 | 2026-05-11 | STATUS-001 | checkpointed | `project_status.md` | File created and aligned with PRD story list | not required for status bootstrap | Establishes per-story checkpoint and rollback rules |
+| 2026-05-11 | STATUS-002 | verified | `AGENTS.md`, `.agents/skills/prd/SKILL.md`, `.agents/skills/ralph/SKILL.md`, `scripts/ralph/*`, `README.md`, `project_status.md` | Project-local Ralph workspace created; `scripts/ralph/prd.json` validated as JSON | not required for Ralph workspace migration | Aligns current project with the `medial_system_demo` local Ralph layout |
 
 ## Open Decisions
 
