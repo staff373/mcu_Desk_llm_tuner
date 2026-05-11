@@ -22,3 +22,13 @@ python verify_no_hardware.py
 ```
 
 该命令会执行 Python 编译、虚拟 YAML 校验、CLI help、GUI self-test/hidden init、虚拟 agent probe，以及可用时的全局 `mcu-bluetooth-executor` skill quick_validate。默认不会打开 COM8 或任何真实串口，结果写入 `reports/no_hardware_verification_summary.json`。
+
+## 从 YAML 打开控制台
+
+生成真实 `mcu_tuning_plan.yaml` 后，用固定入口打开本项目控制台并自动导入：
+
+```powershell
+python scripts/open_tuning_console.py <path-to-mcu_tuning_plan.yaml>
+```
+
+默认只做离线校验和 GUI 导入，不会打开真实串口，也不会自动开始观测或自动调参。需要自动开始时必须显式加 `--auto-start`。

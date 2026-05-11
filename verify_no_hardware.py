@@ -115,7 +115,7 @@ def _build_steps(root: Path, artifact_dir: Path) -> tuple[list[VerificationStep]
     steps = [
         VerificationStep(
             name="py_compile",
-            command=[sys.executable, "-m", "py_compile", *_project_python_files(root)],
+            command=[sys.executable, "-m", "py_compile", *_project_python_files(root), "scripts/open_tuning_console.py"],
             timeout_seconds=180,
         ),
         VerificationStep(
@@ -141,6 +141,10 @@ def _build_steps(root: Path, artifact_dir: Path) -> tuple[list[VerificationStep]
         VerificationStep(
             name="gui_hidden_init_no_serial_guard",
             command=[sys.executable, "-c", HIDDEN_INIT_NO_SERIAL_SCRIPT],
+        ),
+        VerificationStep(
+            name="open_console_launcher_no_launch",
+            command=[sys.executable, "scripts/open_tuning_console.py", str(VIRTUAL_PLAN), "--no-launch"],
         ),
         VerificationStep(
             name="agent_probe",

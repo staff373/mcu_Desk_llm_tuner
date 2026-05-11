@@ -84,6 +84,7 @@ class NoHardwareVerificationHarnessTests(unittest.TestCase):
         self.assertIn("gui_self_test", runner.step_names)
         self.assertIn("gui_hidden_init", runner.step_names)
         self.assertIn("gui_hidden_init_no_serial_guard", runner.step_names)
+        self.assertIn("open_console_launcher_no_launch", runner.step_names)
         self.assertIn("agent_probe", runner.step_names)
 
     def test_run_verification_fails_when_probe_reports_serial_open_attempt(self) -> None:
