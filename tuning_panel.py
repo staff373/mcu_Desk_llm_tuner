@@ -49,6 +49,301 @@ TransportFactory = Callable[[dict[str, Any]], Any]
 SESSION_REPLAY_SCHEMA_VERSION = 1
 
 
+def _draw_round_rect(
+    canvas: tk.Canvas,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    radius: float,
+    *,
+    fill: str,
+    outline: str,
+    tags: str,
+) -> None:
+    radius = max(0, min(radius, (x2 - x1) / 2, (y2 - y1) / 2))
+    points = [
+        x1 + radius,
+        y1,
+        x2 - radius,
+        y1,
+        x2,
+        y1,
+        x2,
+        y1 + radius,
+        x2,
+        y2 - radius,
+        x2,
+        y2,
+        x2 - radius,
+        y2,
+        x1 + radius,
+        y2,
+        x1,
+        y2,
+        x1,
+        y2 - radius,
+        x1,
+        y1 + radius,
+        x1,
+        y1,
+    ]
+    canvas.create_polygon(points, smooth=True, splinesteps=12, fill=fill, outline=outline, tags=tags)
+
+
+class RoundedCard(tk.Frame):
+    def __init__(
+        self,
+        parent: tk.Widget,
+        *,
+        fill: str,
+        outer_bg: str,
+        outline: str,
+        radius: int = 18,
+        padding: int = 12,
+    ) -> None:
+        super().__init__(parent, bg=outer_bg, bd=0, highlightthickness=0)
+        self.fill = fill
+        self.outline = outline
+        self.radius = radius
+        self.padding = padding
+        self.canvas = tk.Canvas(self, bg=outer_bg, bd=0, highlightthickness=0)
+        self.canvas.pack(fill="both", expand=True)
+        self.body = tk.Frame(self.canvas, bg=fill, bd=0, highlightthickness=0)
+        self._window_id = self.canvas.create_window(padding, padding, anchor="nw", window=self.body)
+        self.canvas.bind("<Configure>", self._redraw)
+        self.body.bind("<Configure>", self._sync_requested_size)
+        self.after_idle(self._sync_requested_size)
+
+    def _sync_requested_size(self, _event: tk.Event | None = None) -> None:
+        width = max(1, self.body.winfo_reqwidth() + self.padding * 2)
+        height = max(1, self.body.winfo_reqheight() + self.padding * 2)
+        self.canvas.configure(width=width, height=height)
+
+    def _redraw(self, event: tk.Event) -> None:
+        width = max(1, int(event.width))
+        height = max(1, int(event.height))
+        self.canvas.delete("rounded-card")
+        _draw_round_rect(
+            self.canvas,
+            1,
+            1,
+            width - 1,
+            height - 1,
+            self.radius,
+            fill=self.fill,
+            outline=self.outline,
+            tags="rounded-card",
+        )
+        self.canvas.tag_lower("rounded-card")
+        self.canvas.itemconfigure(
+            self._window_id,
+            width=max(1, width - self.padding * 2),
+            height=max(1, height - self.padding * 2),
+        )
+
+
+class PillButton(tk.Canvas):
+    def __init__(
+        self,
+        parent: tk.Widget,
+        *,
+        text: str,
+        command: Callable[[], None],
+        font_family: str,
+        normal_bg: str,
+        active_bg: str,
+        hover_bg: str,
+        normal_fg: str,
+        active_fg: str,
+        border: str,
+        active_border: str,
+        canvas_bg: str,
+    ) -> None:
+        button_font = tkfont.Font(family=font_family, size=10, weight="bold")
+        width = max(72, button_font.measure(text) + 30)
+        super().__init__(
+            parent,
+            width=width,
+            height=34,
+            bg=canvas_bg,
+            bd=0,
+            highlightthickness=0,
+            cursor="hand2",
+        )
+        self.text = text
+        self.command = command
+        self.button_font = button_font
+        self.normal_bg = normal_bg
+        self.active_bg = active_bg
+        self.hover_bg = hover_bg
+        self.normal_fg = normal_fg
+        self.active_fg = active_fg
+        self.border = border
+        self.active_border = active_border
+        self.active = False
+        self.hovered = False
+        self.bind("<Button-1>", lambda _event: self.command())
+        self.bind("<Enter>", self._set_hovered)
+        self.bind("<Leave>", self._clear_hovered)
+        self.bind("<Configure>", lambda _event: self._redraw())
+        self._redraw()
+
+    def set_active(self, active: bool) -> None:
+        self.active = active
+        self._redraw()
+
+    def _set_hovered(self, _event: tk.Event) -> None:
+        self.hovered = True
+        self._redraw()
+
+    def _clear_hovered(self, _event: tk.Event) -> None:
+        self.hovered = False
+        self._redraw()
+
+    def _redraw(self) -> None:
+        self.delete("pill")
+        width = max(1, self.winfo_width())
+        height = max(1, self.winfo_height())
+        fill = self.active_bg if self.active else self.hover_bg if self.hovered else self.normal_bg
+        outline = self.active_border if self.active else self.border
+        foreground = self.active_fg if self.active else self.normal_fg
+        _draw_round_rect(
+            self,
+            1,
+            1,
+            width - 1,
+            height - 1,
+            height / 2,
+            fill=fill,
+            outline=outline,
+            tags="pill",
+        )
+        self.create_text(
+            width / 2,
+            height / 2,
+            text=self.text,
+            fill=foreground,
+            font=self.button_font,
+            tags="pill",
+        )
+
+
+class RoundedActionButton(tk.Canvas):
+    def __init__(
+        self,
+        parent: tk.Widget,
+        *,
+        text: str,
+        command: Callable[[], Any],
+        font_family: str,
+        normal_bg: str,
+        hover_bg: str,
+        disabled_bg: str,
+        foreground: str,
+        disabled_fg: str,
+        border: str,
+        disabled_border: str,
+        canvas_bg: str,
+        min_width: int = 94,
+        height: int = 36,
+        horizontal_padding: int = 36,
+        font_size: int = 10,
+        font_weight: str = "bold",
+    ) -> None:
+        self.button_font = tkfont.Font(family=font_family, size=font_size, weight=font_weight)
+        width = max(min_width, self.button_font.measure(text) + horizontal_padding)
+        super().__init__(
+            parent,
+            width=width,
+            height=height,
+            bg=canvas_bg,
+            bd=0,
+            highlightthickness=0,
+            cursor="hand2",
+        )
+        self.text = text
+        self.command = command
+        self.normal_bg = normal_bg
+        self.hover_bg = hover_bg
+        self.disabled_bg = disabled_bg
+        self.foreground = foreground
+        self.disabled_fg = disabled_fg
+        self.border = border
+        self.disabled_border = disabled_border
+        self.state = "normal"
+        self.hovered = False
+        self.bind("<Button-1>", lambda _event: self.invoke())
+        self.bind("<Enter>", self._set_hovered)
+        self.bind("<Leave>", self._clear_hovered)
+        self.bind("<Configure>", lambda _event: self._redraw())
+        self._redraw()
+
+    def configure(self, cnf: Any = None, **kwargs: Any) -> Any:
+        if cnf is not None:
+            return super().configure(cnf, **kwargs)
+        if "state" in kwargs:
+            self.state = str(kwargs.pop("state"))
+            self.configure(cursor="arrow" if self.state == "disabled" else "hand2")
+        if "text" in kwargs:
+            self.text = str(kwargs.pop("text"))
+        if kwargs:
+            super().configure(**kwargs)
+        self._redraw()
+        return None
+
+    config = configure
+
+    def cget(self, key: str) -> Any:
+        if key == "state":
+            return self.state
+        if key == "text":
+            return self.text
+        return super().cget(key)
+
+    def instate(self, states: list[str] | tuple[str, ...]) -> bool:
+        for state in states:
+            if state == "disabled" and self.state != "disabled":
+                return False
+            if state == "!disabled" and self.state == "disabled":
+                return False
+        return True
+
+    def invoke(self) -> Any:
+        if self.state == "disabled":
+            return None
+        return self.command()
+
+    def _set_hovered(self, _event: tk.Event) -> None:
+        self.hovered = True
+        self._redraw()
+
+    def _clear_hovered(self, _event: tk.Event) -> None:
+        self.hovered = False
+        self._redraw()
+
+    def _redraw(self) -> None:
+        self.delete("button")
+        width = max(1, self.winfo_width())
+        height = max(1, self.winfo_height())
+        disabled = self.state == "disabled"
+        fill = self.disabled_bg if disabled else self.hover_bg if self.hovered else self.normal_bg
+        outline = self.disabled_border if disabled else self.border
+        foreground = self.disabled_fg if disabled else self.foreground
+        _draw_round_rect(
+            self,
+            1,
+            1,
+            width - 1,
+            height - 1,
+            height / 2,
+            fill=fill,
+            outline=outline,
+            tags="button",
+        )
+        self.create_text(width / 2, height / 2, text=self.text, fill=foreground, font=self.button_font, tags="button")
+
+
 @dataclass
 class SessionReplayLoadResult:
     source_path: Path
@@ -427,12 +722,20 @@ class TuningPanel(tk.Tk):
         self.command_preview_status = tk.StringVar(value="未加载命令预览")
         self.replay_path = tk.StringVar(value="")
         self.replay_status = tk.StringVar(value="未加载回放")
+        initial_theme = os.environ.get("MCU_TUNING_PANEL_THEME", "light").strip().lower()
+        if initial_theme not in {"light", "dark"}:
+            initial_theme = "light"
+        self.theme_mode = tk.StringVar(value=initial_theme)
 
         self.plan: dict[str, Any] | None = None
         self.validated_plan_path: Path | None = None
         self.session: Any | None = None
         self.session_worker: SessionWorker | None = None
-        self.operator_buttons: dict[str, ttk.Button] = {}
+        self.operator_buttons: dict[str, Any] = {}
+        self.mode_buttons: dict[str, Any] = {}
+        self.simple_nav_buttons: dict[str, tk.Label] = {}
+        self.simple_nav_order = ["tuning", "history", "waveform"]
+        self.simple_active_page = "tuning"
         self.connection_buttons: dict[str, ttk.Button] = {}
         self.parameter_metadata_by_key: dict[str, dict[str, Any]] = {}
         self.parameter_current_values: dict[str, Any] = {}
@@ -451,6 +754,7 @@ class TuningPanel(tk.Tk):
         self.run_backend = run_backend or os.environ.get("MCU_TUNING_PANEL_RUN_BACKEND", "session")
         if self.run_backend not in {"session", "subprocess"}:
             self.run_backend = "session"
+        self.mode.trace_add("write", lambda *_args: self._refresh_mode_chips())
         self.proc: subprocess.Popen[str] | None = None
         self.reader_thread: threading.Thread | None = None
         self.output_queue: queue.Queue[Any] = queue.Queue()
@@ -460,26 +764,9 @@ class TuningPanel(tk.Tk):
         self.transcript_handle: Any | None = None
         self.ui_font = self._pick_font(("Microsoft YaHei UI", "Segoe UI", "Arial"))
         self.mono_font = self._pick_font(("Cascadia Mono", "Consolas", "Courier New"))
-        self.colors = {
-            "bg": "#edf1ee",
-            "panel": "#fbfcfa",
-            "panel_soft": "#f4f7f5",
-            "header": "#141a18",
-            "header_subtle": "#aebdb7",
-            "text": "#15201d",
-            "muted": "#66736f",
-            "border": "#d5ddd8",
-            "accent": "#087f8c",
-            "accent_active": "#0f6b73",
-            "danger": "#c2410c",
-            "danger_active": "#9a3412",
-            "warning": "#d97706",
-            "success": "#2f9e44",
-            "rail": "#18211f",
-            "rail_soft": "#22302d",
-            "log_bg": "#111715",
-            "log_fg": "#d9e3df",
-        }
+        self.colors = self._theme_colors(self.theme_mode.get())
+        self.theme_button: RoundedActionButton | None = None
+        self.theme_status_label: ttk.Label | None = None
         self._configure_fonts()
 
         self._build_style()
@@ -488,6 +775,71 @@ class TuningPanel(tk.Tk):
 
         if auto_demo:
             self.after(300, self.start)
+
+    def _theme_colors(self, mode: str) -> dict[str, str]:
+        if mode == "dark":
+            return {
+                "bg": "#08142f",
+                "panel": "#0f1f46",
+                "panel_soft": "#60a5fa",
+                "header": "#020617",
+                "header_subtle": "#93c5fd",
+                "text": "#dbeafe",
+                "muted": "#93c5fd",
+                "border": "#2563eb",
+                "accent": "#60a5fa",
+                "accent_active": "#93c5fd",
+                "accent_text": "#06142f",
+                "danger": "#fb7185",
+                "danger_active": "#fb7185",
+                "danger_text": "#7f1d1d",
+                "warning": "#f59e0b",
+                "success": "#10b981",
+                "rail": "#030a1c",
+                "rail_soft": "#101a33",
+                "log_bg": "#0b1738",
+                "log_fg": "#dbeafe",
+                "row_even": "#10275a",
+                "row_odd": "#173b7a",
+                "kpi_blue": "#2563eb",
+                "kpi_green": "#059669",
+                "kpi_yellow": "#d97706",
+                "kpi_purple": "#7c3aed",
+                "theme_button_bg": "#facc15",
+                "theme_button_hover": "#fde047",
+                "theme_button_fg": "#422006",
+            }
+        return {
+            "bg": "#e6f0ff",
+            "panel": "#ffffff",
+            "panel_soft": "#cfe0ff",
+            "header": "#030a1c",
+            "header_subtle": "#90a4c2",
+            "text": "#111827",
+            "muted": "#64748b",
+            "border": "#93b5ff",
+            "accent": "#4f46e5",
+            "accent_active": "#a5b4fc",
+            "accent_text": "#1e1b4b",
+            "danger": "#e11d48",
+            "danger_active": "#fb7185",
+            "danger_text": "#be123c",
+            "warning": "#f59e0b",
+            "success": "#10b981",
+            "rail": "#030a1c",
+            "rail_soft": "#101a33",
+            "log_bg": "#ffffff",
+            "log_fg": "#334155",
+            "row_even": "#ffffff",
+            "row_odd": "#dbeafe",
+            "kpi_blue": "#93c5fd",
+            "kpi_green": "#86efac",
+            "kpi_yellow": "#fde047",
+            "kpi_purple": "#c4b5fd",
+            "theme_button_bg": "#93c5fd",
+            "theme_button_hover": "#60a5fa",
+            "theme_button_fg": "#0f172a",
+        }
 
     def _pick_font(self, candidates: tuple[str, ...]) -> str:
         available = {name.lower(): name for name in tkfont.families(self)}
@@ -522,6 +874,10 @@ class TuningPanel(tk.Tk):
         style.configure("Surface.TFrame", background=self.colors["panel_soft"], relief="flat")
         style.configure("Rail.TFrame", background=self.colors["rail"], relief="flat")
         style.configure("RailSoft.TFrame", background=self.colors["rail_soft"], relief="flat")
+        style.configure("KpiBlue.TFrame", background=self.colors["kpi_blue"], relief="flat")
+        style.configure("KpiGreen.TFrame", background=self.colors["kpi_green"], relief="flat")
+        style.configure("KpiYellow.TFrame", background=self.colors["kpi_yellow"], relief="flat")
+        style.configure("KpiPurple.TFrame", background=self.colors["kpi_purple"], relief="flat")
         style.configure(
             "Header.TLabel",
             background=self.colors["header"],
@@ -572,8 +928,8 @@ class TuningPanel(tk.Tk):
         )
         style.configure(
             "Pill.TLabel",
-            background="#e6f5f3",
-            foreground=self.colors["accent"],
+            background=self.colors["accent_active"],
+            foreground=self.colors["accent_text"],
             font=(self.ui_font, 9, "bold"),
             padding=(10, 4),
         )
@@ -595,50 +951,170 @@ class TuningPanel(tk.Tk):
             foreground=self.colors["muted"],
             font=(self.ui_font, 10),
         )
+        for style_name, bg in (
+            ("Blue", self.colors["kpi_blue"]),
+            ("Green", self.colors["kpi_green"]),
+            ("Yellow", self.colors["kpi_yellow"]),
+            ("Purple", self.colors["kpi_purple"]),
+        ):
+            style.configure(
+                f"{style_name}Metric.TLabel",
+                background=bg,
+                foreground=self.colors["text"],
+                font=(self.ui_font, 13, "bold"),
+            )
+            style.configure(
+                f"{style_name}Muted.TLabel",
+                background=bg,
+                foreground=self.colors["muted"],
+                font=(self.ui_font, 10),
+            )
         style.configure("Footer.TLabel", background=self.colors["bg"], foreground=self.colors["muted"], font=(self.ui_font, 9))
         style.configure("FooterValue.TLabel", background=self.colors["bg"], foreground=self.colors["text"], font=(self.ui_font, 9))
-        style.configure("TEntry", fieldbackground="#ffffff", bordercolor=self.colors["border"], padding=(8, 5), font=(self.ui_font, 10))
+        style.configure(
+            "PageTitle.TLabel",
+            background=self.colors["bg"],
+            foreground=self.colors["text"],
+            font=(self.ui_font, 18, "bold"),
+        )
+        style.configure(
+            "PageSubtitle.TLabel",
+            background=self.colors["bg"],
+            foreground=self.colors["muted"],
+            font=(self.ui_font, 10),
+        )
+        style.configure(
+            "Filter.TButton",
+            background="#f3f7ff",
+            foreground="#334155",
+            font=(self.ui_font, 10, "bold"),
+            padding=(14, 7),
+            borderwidth=1,
+            relief="flat",
+            bordercolor=self.colors["border"],
+        )
+        style.map("Filter.TButton", background=[("active", "#dbeafe")], foreground=[("active", "#1e3a8a")])
+        style.configure(
+            "FilterActive.TButton",
+            background=self.colors["accent_active"],
+            foreground=self.colors["accent_text"],
+            font=(self.ui_font, 10, "bold"),
+            padding=(14, 7),
+            borderwidth=1,
+            relief="flat",
+            bordercolor="#a5b4fc",
+        )
+        style.map(
+            "FilterActive.TButton",
+            background=[("active", "#c7d2fe")],
+            foreground=[("active", self.colors["accent_text"])],
+        )
+        style.configure(
+            "TEntry",
+            fieldbackground="#ffffff",
+            foreground=self.colors["text"],
+            insertcolor=self.colors["accent"],
+            bordercolor=self.colors["border"],
+            padding=(8, 5),
+            font=(self.ui_font, 10),
+        )
         style.configure("TRadiobutton", background=self.colors["panel"], foreground=self.colors["text"], font=(self.ui_font, 10))
         style.configure("Rail.TRadiobutton", background=self.colors["rail"], foreground="#f8faf8", font=(self.ui_font, 10))
         style.map("TRadiobutton", background=[("active", self.colors["panel"])])
         style.map("Rail.TRadiobutton", background=[("active", self.colors["rail_soft"])], foreground=[("active", "#ffffff")])
-        style.configure("TButton", font=(self.ui_font, 10), padding=(12, 7), borderwidth=0)
-        style.configure("Accent.TButton", background=self.colors["accent"], foreground="#ffffff", font=(self.ui_font, 10, "bold"))
-        style.map("Accent.TButton", background=[("active", self.colors["accent_active"])])
-        style.configure("Danger.TButton", background=self.colors["danger"], foreground="#ffffff", font=(self.ui_font, 10, "bold"))
-        style.map("Danger.TButton", background=[("active", self.colors["danger_active"])])
-        style.configure("Quiet.TButton", background="#e8eee9", foreground=self.colors["text"], font=(self.ui_font, 10), padding=(12, 7))
-        style.map("Quiet.TButton", background=[("active", "#dbe6df")])
-        style.configure("TNotebook", background=self.colors["bg"], borderwidth=0)
+        style.configure("TButton", font=(self.ui_font, 10), padding=(12, 7), borderwidth=0, relief="flat")
+        style.configure(
+            "Accent.TButton",
+            background=self.colors["accent_active"],
+            foreground=self.colors["accent_text"],
+            font=(self.ui_font, 10, "bold"),
+            borderwidth=1,
+            bordercolor="#a5b4fc",
+            relief="flat",
+        )
+        style.map(
+            "Accent.TButton",
+            background=[("active", "#b8c4ff"), ("disabled", "#edf2ff")],
+            foreground=[("active", self.colors["accent_text"]), ("disabled", "#94a3b8")],
+        )
+        style.configure(
+            "Danger.TButton",
+            background=self.colors["danger_active"],
+            foreground=self.colors["danger_text"],
+            font=(self.ui_font, 10, "bold"),
+            borderwidth=1,
+            bordercolor="#fecdd3",
+            relief="flat",
+        )
+        style.map(
+            "Danger.TButton",
+            background=[("active", "#fecdd3"), ("disabled", "#fff1f2")],
+            foreground=[("active", self.colors["danger_text"]), ("disabled", "#fda4af")],
+        )
+        style.configure(
+            "Quiet.TButton",
+            background="#edf4ff",
+            foreground="#334155",
+            font=(self.ui_font, 10),
+            padding=(12, 7),
+            borderwidth=1,
+            bordercolor=self.colors["border"],
+            relief="flat",
+        )
+        style.map(
+            "Quiet.TButton",
+            background=[("active", "#dbeafe"), ("disabled", "#f8fafc")],
+            foreground=[("active", "#1e3a8a"), ("disabled", "#94a3b8")],
+        )
+        style.configure("TNotebook", background=self.colors["bg"], borderwidth=0, tabmargins=(0, 0, 0, 0))
+        style.configure("Hidden.TNotebook", background=self.colors["bg"], borderwidth=0, tabmargins=(0, 0, 0, 0))
+        try:
+            style.layout("Hidden.TNotebook", [("Notebook.client", {"sticky": "nswe"})])
+            style.layout("Hidden.TNotebook.Tab", [])
+        except tk.TclError:
+            pass
         style.configure(
             "TNotebook.Tab",
-            background="#dde6e1",
-            foreground="#33413d",
+            background="#eef2f8",
+            foreground="#64748b",
             font=(self.ui_font, 10, "bold"),
             padding=(18, 9),
         )
         style.map(
             "TNotebook.Tab",
-            background=[("selected", self.colors["panel"]), ("active", "#eef4f0")],
+            background=[("selected", self.colors["panel"]), ("active", "#f4f7ff")],
             foreground=[("selected", self.colors["text"]), ("active", self.colors["text"])],
         )
         style.configure(
             "Treeview",
             rowheight=28,
             font=(self.ui_font, 10),
-            background="#ffffff",
-            fieldbackground="#ffffff",
+            background=self.colors["panel"],
+            fieldbackground=self.colors["panel"],
             foreground=self.colors["text"],
             borderwidth=0,
+            relief="flat",
+            bordercolor=self.colors["panel"],
+            lightcolor=self.colors["panel"],
+            darkcolor=self.colors["panel"],
         )
         style.configure(
             "Treeview.Heading",
             background=self.colors["panel_soft"],
-            foreground="#334155",
+            foreground=self.colors["accent_text"],
             font=(self.ui_font, 10, "bold"),
             padding=(8, 7),
+            borderwidth=0,
+            relief="flat",
+            bordercolor=self.colors["panel_soft"],
+            lightcolor=self.colors["panel_soft"],
+            darkcolor=self.colors["panel_soft"],
         )
-        style.map("Treeview", background=[("selected", "#dbeafe")], foreground=[("selected", self.colors["text"])])
+        style.map("Treeview", background=[("selected", "#c7d2fe")], foreground=[("selected", self.colors["accent_text"])])
+        try:
+            style.layout("Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
+        except tk.TclError:
+            pass
 
     def _build_ui(self) -> None:
         if self.ui_mode == "advanced":
@@ -646,121 +1122,318 @@ class TuningPanel(tk.Tk):
             return
         self._build_simple_ui()
 
-    def _build_simple_ui(self) -> None:
-        header = tk.Frame(self, bg=self.colors["header"], height=76)
-        header.pack(fill="x")
-        header.pack_propagate(False)
-        header.columnconfigure(0, weight=1)
-        title_block = tk.Frame(header, bg=self.colors["header"])
-        title_block.grid(row=0, column=0, sticky="w", padx=22, pady=(12, 0))
-        ttk.Label(title_block, text="MCU 调参控制台", style="HeroTitle.TLabel").pack(anchor="w")
-        ttk.Label(title_block, text="过程、历史、得分与波形集中在一个清爽工作台。", style="SubHeader.TLabel").pack(
+    def _simple_card(
+        self,
+        parent: tk.Widget,
+        *,
+        fill: str | None = None,
+        outline: str | None = None,
+        radius: int = 18,
+        padding: int = 12,
+    ) -> tuple[RoundedCard, tk.Frame]:
+        card = RoundedCard(
+            parent,
+            fill=fill or self.colors["panel"],
+            outer_bg=self.colors["bg"],
+            outline=outline or self.colors["border"],
+            radius=radius,
+            padding=padding,
+        )
+        return card, card.body
+
+    def _simple_button_palette(self, style_name: str | None) -> dict[str, str]:
+        dark = self.theme_mode.get() == "dark"
+        if style_name == "Danger.TButton":
+            if dark:
+                return {
+                    "normal_bg": "#fb7185",
+                    "hover_bg": "#f43f5e",
+                    "disabled_bg": "#3f1724",
+                    "foreground": "#450a0a",
+                    "disabled_fg": "#fb7185",
+                    "border": "#fb7185",
+                    "disabled_border": "#7f1d1d",
+                }
+            return {
+                "normal_bg": "#fb7185",
+                "hover_bg": "#f43f5e",
+                "disabled_bg": "#ffe4e6",
+                "foreground": "#7f1d1d",
+                "disabled_fg": "#be123c",
+                "border": "#e11d48",
+                "disabled_border": "#fecdd3",
+            }
+        if style_name == "Accent.TButton":
+            if dark:
+                return {
+                    "normal_bg": "#60a5fa",
+                    "hover_bg": "#93c5fd",
+                    "disabled_bg": "#1e3a8a",
+                    "foreground": "#06142f",
+                    "disabled_fg": "#93c5fd",
+                    "border": "#60a5fa",
+                    "disabled_border": "#2563eb",
+                }
+            return {
+                "normal_bg": "#93c5fd",
+                "hover_bg": "#60a5fa",
+                "disabled_bg": "#dbeafe",
+                "foreground": "#0f172a",
+                "disabled_fg": "#1e3a8a",
+                "border": "#2563eb",
+                "disabled_border": "#93c5fd",
+            }
+        if dark:
+            return {
+                "normal_bg": "#1d4ed8",
+                "hover_bg": "#2563eb",
+                "disabled_bg": "#10275a",
+                "foreground": "#dbeafe",
+                "disabled_fg": "#60a5fa",
+                "border": "#3b82f6",
+                "disabled_border": "#1e3a8a",
+            }
+        return {
+            "normal_bg": "#bfdbfe",
+            "hover_bg": "#93c5fd",
+            "disabled_bg": "#e0edff",
+            "foreground": "#1e3a8a",
+            "disabled_fg": "#64748b",
+            "border": "#60a5fa",
+            "disabled_border": "#bfdbfe",
+        }
+
+    def _simple_action_button(
+        self,
+        parent: tk.Widget,
+        text: str,
+        command: Callable[[], Any],
+        style_name: str | None = None,
+    ) -> RoundedActionButton:
+        palette = self._simple_button_palette(style_name)
+        return RoundedActionButton(
+            parent,
+            text=text,
+            command=command,
+            font_family=self.ui_font,
+            canvas_bg=self.colors["panel"],
+            **palette,
+        )
+
+    def _theme_icon(self) -> str:
+        return "\u263e" if self.theme_mode.get() == "dark" else "\u2600"
+
+    def _toggle_theme(self) -> None:
+        self._set_theme("light" if self.theme_mode.get() == "dark" else "dark")
+
+    def _set_theme(self, mode: str) -> None:
+        if mode not in {"light", "dark"} or mode == self.theme_mode.get():
+            return
+        current_page = self.simple_active_page
+        log_text = self.log.get("1.0", "end-1c") if hasattr(self, "log") else ""
+        self.theme_mode.set(mode)
+        self.colors = self._theme_colors(mode)
+        if self.ui_mode == "simple":
+            for child in self.winfo_children():
+                child.destroy()
+            self.operator_buttons.clear()
+            self.mode_buttons.clear()
+            self.simple_nav_buttons.clear()
+            self._build_style()
+            self._build_ui()
+            if log_text and hasattr(self, "log"):
+                self.log.insert("end", log_text + "\n", "INFO")
+                self.log.see("end")
+            self._select_simple_page(current_page)
+            self._refresh_tuning_tree()
+            self._refresh_parameter_tree()
+            self._refresh_operator_controls()
+            if hasattr(self, "waveform_canvas"):
+                self._draw_waveform()
+            return
+        self._build_style()
+
+    def _theme_button_palette(self) -> dict[str, str]:
+        return {
+            "normal_bg": self.colors["theme_button_bg"],
+            "hover_bg": self.colors["theme_button_hover"],
+            "disabled_bg": self.colors["theme_button_bg"],
+            "foreground": self.colors["theme_button_fg"],
+            "disabled_fg": self.colors["theme_button_fg"],
+            "border": self.colors["theme_button_hover"],
+            "disabled_border": self.colors["theme_button_bg"],
+        }
+
+    def _build_theme_button(self, parent: tk.Widget) -> RoundedActionButton:
+        return RoundedActionButton(
+            parent,
+            text=self._theme_icon(),
+            command=self._toggle_theme,
+            font_family=self.ui_font,
+            canvas_bg=self.colors["bg"],
+            min_width=40,
+            height=36,
+            horizontal_padding=16,
+            font_size=13,
+            **self._theme_button_palette(),
+        )
+
+    def _add_simple_nav_item(self, parent: tk.Widget, page_key: str, text: str) -> None:
+        label = tk.Label(
+            parent,
+            text=text,
+            bg=self.colors["rail"],
+            fg="#8da0bd",
+            font=(self.ui_font, 10, "bold"),
             anchor="w",
-            pady=(4, 0),
+            padx=18,
+            pady=11,
+            cursor="hand2",
         )
-        status_block = tk.Frame(header, bg=self.colors["header"])
-        status_block.grid(row=0, column=1, sticky="e", padx=22, pady=(16, 0))
-        ttk.Label(status_block, textvariable=self.status, style="Pill.TLabel").pack(side="right")
-        ttk.Label(status_block, text="当前状态", style="SubHeader.TLabel").pack(side="right", padx=(0, 10))
+        label.pack(fill="x", padx=(0, 8), pady=(0, 4))
+        label.bind("<Button-1>", lambda _event, key=page_key: self._select_simple_page(key))
+        label.bind("<Enter>", lambda _event, item=label, key=page_key: self._hover_simple_nav(item, key, True))
+        label.bind("<Leave>", lambda _event, item=label, key=page_key: self._hover_simple_nav(item, key, False))
+        self.simple_nav_buttons[page_key] = label
 
-        main = ttk.Frame(self, padding=14)
-        main.pack(fill="both", expand=True)
-        main.columnconfigure(0, minsize=286)
-        main.columnconfigure(1, weight=1)
-        main.rowconfigure(0, weight=1)
+    def _hover_simple_nav(self, item: tk.Label, page_key: str, hovered: bool) -> None:
+        if page_key == self.simple_active_page:
+            return
+        item.configure(bg="#132557" if hovered else self.colors["rail"], fg="#dbeafe" if hovered else "#8da0bd")
 
-        rail = ttk.Frame(main, style="Rail.TFrame", padding=16)
-        rail.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
-        rail.columnconfigure(0, weight=1)
-        ttk.Label(rail, text="Session", style="RailTitle.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Label(rail, text="只保留启动、校验和人工干预。", style="RailMuted.TLabel").grid(
-            row=1,
-            column=0,
-            sticky="w",
-            pady=(4, 14),
-        )
+    def _select_simple_page(self, page_key: str) -> None:
+        if page_key not in self.simple_nav_order:
+            return
+        self.simple_active_page = page_key
+        if hasattr(self, "notebook"):
+            try:
+                self.notebook.select(self.simple_nav_order.index(page_key))
+            except tk.TclError:
+                pass
+        self._refresh_simple_nav()
 
-        plan_card = ttk.Frame(rail, style="RailSoft.TFrame", padding=12)
-        plan_card.grid(row=2, column=0, sticky="ew", pady=(0, 12))
-        plan_card.columnconfigure(0, weight=1)
-        ttk.Label(plan_card, text="调参计划", style="RailCaption.TLabel").grid(row=0, column=0, sticky="w")
-        ttk.Entry(plan_card, textvariable=self.plan_path).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 8))
-        ttk.Button(plan_card, text="选择 YAML", command=self.browse_plan, style="Quiet.TButton").grid(
-            row=2,
-            column=0,
-            sticky="ew",
-            padx=(0, 6),
-        )
-        ttk.Button(plan_card, text="校验", command=self.validate_current_plan, style="Accent.TButton").grid(
-            row=2,
-            column=1,
-            sticky="ew",
-        )
-
-        mode_card = ttk.Frame(rail, style="Rail.TFrame")
-        mode_card.grid(row=3, column=0, sticky="ew", pady=(0, 12))
-        ttk.Label(mode_card, text="运行模式", style="RailMuted.TLabel").pack(anchor="w", pady=(0, 8))
-        ttk.Radiobutton(mode_card, text="演示", variable=self.mode, value="demo", style="Rail.TRadiobutton").pack(anchor="w", pady=(0, 6))
-        ttk.Radiobutton(mode_card, text="观测", variable=self.mode, value="monitor", style="Rail.TRadiobutton").pack(anchor="w", pady=(0, 6))
-        ttk.Radiobutton(mode_card, text="自动调参", variable=self.mode, value="run", style="Rail.TRadiobutton").pack(anchor="w")
-
-        action_card = ttk.Frame(rail, style="RailSoft.TFrame", padding=12)
-        action_card.grid(row=4, column=0, sticky="ew", pady=(0, 12))
-        ttk.Label(action_card, text="动作", style="RailCaption.TLabel").pack(anchor="w", pady=(0, 8))
-        primary_actions = ttk.Frame(action_card, style="RailSoft.TFrame")
-        primary_actions.pack(fill="x")
-        self._add_operator_button(primary_actions, "start_monitor", "开始观测", self.start_monitor, "Accent.TButton")
-        self.operator_buttons["start_monitor"].pack_configure(side="top", fill="x", pady=(0, 8), padx=0)
-        self._add_operator_button(primary_actions, "start_auto_tune", "开始调参", self.start_auto_tune, "Accent.TButton")
-        self.operator_buttons["start_auto_tune"].pack_configure(side="top", fill="x", pady=(0, 10), padx=0)
-
-        sub_actions = ttk.Frame(action_card, style="RailSoft.TFrame")
-        sub_actions.pack(fill="x")
-        sub_actions.columnconfigure((0, 1), weight=1)
-        self.operator_buttons["pause"] = ttk.Button(sub_actions, text="暂停", command=self.pause_session, style="Quiet.TButton")
-        self.operator_buttons["pause"].grid(row=0, column=0, sticky="ew", padx=(0, 6), pady=(0, 8))
-        self.operator_buttons["resume"] = ttk.Button(sub_actions, text="继续", command=self.resume_session, style="Quiet.TButton")
-        self.operator_buttons["resume"].grid(row=0, column=1, sticky="ew", pady=(0, 8))
-        self.operator_buttons["stop"] = ttk.Button(sub_actions, text="停止", command=self.stop, style="Danger.TButton")
-        self.operator_buttons["stop"].grid(row=1, column=0, sticky="ew", padx=(0, 6))
-        self.operator_buttons["emergency_stop"] = ttk.Button(
-            sub_actions,
-            text="急停",
-            command=self.emergency_stop,
-            style="Danger.TButton",
-        )
-        self.operator_buttons["emergency_stop"].grid(row=1, column=1, sticky="ew")
-
-        info_card = ttk.Frame(rail, style="RailSoft.TFrame", padding=12)
-        info_card.grid(row=5, column=0, sticky="ew")
-        info_card.columnconfigure(0, weight=1)
-        for row, (caption, variable) in enumerate(
-            (
-                ("串口", self.port),
-                ("波特率", self.baudrate),
-                ("记录", self.transcript_path),
+    def _refresh_simple_nav(self) -> None:
+        for key, label in self.simple_nav_buttons.items():
+            active = key == self.simple_active_page
+            label.configure(
+                bg="#1e3a8a" if active else self.colors["rail"],
+                fg="#dbeafe" if active else "#8da0bd",
+                font=(self.ui_font, 10, "bold" if active else "normal"),
             )
-        ):
-            ttk.Label(info_card, text=caption, style="RailCaption.TLabel").grid(row=row * 2, column=0, sticky="w")
-            ttk.Label(info_card, textvariable=variable, style="RailValue.TLabel", wraplength=220).grid(
-                row=row * 2 + 1,
-                column=0,
-                sticky="ew",
-                pady=(3, 10 if row < 2 else 0),
-            )
-        rail.rowconfigure(6, weight=1)
-        ttk.Button(rail, text="打开记录", command=self.open_transcript, style="Quiet.TButton").grid(
-            row=7,
-            column=0,
-            sticky="ew",
-            pady=(14, 0),
-        )
 
-        self.notebook = ttk.Notebook(main)
-        self.notebook.grid(row=0, column=1, sticky="nsew")
+    def _build_simple_ui(self) -> None:
+        shell = ttk.Frame(self)
+        shell.pack(fill="both", expand=True)
+        shell.columnconfigure(1, weight=1)
+        shell.rowconfigure(0, weight=1)
+
+        sidebar = tk.Frame(shell, bg=self.colors["rail"], width=160)
+        sidebar.grid(row=0, column=0, sticky="ns")
+        sidebar.grid_propagate(False)
+        tk.Label(
+            sidebar,
+            text="MCU Tuner",
+            bg=self.colors["rail"],
+            fg="#dbeafe",
+            font=(self.ui_font, 12, "bold"),
+            anchor="w",
+        ).pack(fill="x", padx=18, pady=(22, 0))
+        tk.Label(
+            sidebar,
+            text="Tuning Console",
+            bg=self.colors["rail"],
+            fg="#6b7c99",
+            font=(self.ui_font, 9),
+            anchor="w",
+        ).pack(fill="x", padx=18, pady=(2, 20))
+        self.simple_nav_buttons.clear()
+        for page_key, text in (("tuning", "仪表盘"), ("history", "历史记录"), ("waveform", "波形图")):
+            self._add_simple_nav_item(sidebar, page_key, text)
+        self._refresh_simple_nav()
+        tk.Label(
+            sidebar,
+            text="本阶段不打开真实串口",
+            bg=self.colors["rail"],
+            fg="#6b7c99",
+            font=(self.ui_font, 8),
+            anchor="w",
+            wraplength=120,
+        ).pack(side="bottom", fill="x", padx=18, pady=(0, 18))
+
+        main = ttk.Frame(shell, padding=(18, 18, 18, 14))
+        main.grid(row=0, column=1, sticky="nsew")
+        main.columnconfigure(0, weight=1)
+        main.rowconfigure(2, weight=1)
+
+        page_header = ttk.Frame(main)
+        page_header.grid(row=0, column=0, sticky="ew", pady=(0, 14))
+        page_header.columnconfigure(0, weight=1)
+        ttk.Label(page_header, text="调参仪表盘", style="PageTitle.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            page_header,
+            text="MCU 自动调参过程、参数变化、历史评分与遥测趋势",
+            style="PageSubtitle.TLabel",
+        ).grid(row=1, column=0, sticky="w", pady=(3, 0))
+        status_panel = ttk.Frame(page_header)
+        status_panel.grid(row=0, column=1, rowspan=2, sticky="e")
+        status_row = ttk.Frame(status_panel)
+        status_row.pack(side="top", anchor="e")
+        ttk.Label(status_row, text="实时数据", style="PageSubtitle.TLabel").pack(side="left", padx=(0, 10))
+        self.theme_button = self._build_theme_button(status_row)
+        self.theme_button.pack(side="left")
+        ttk.Label(status_panel, textvariable=self.status, style="Pill.TLabel").pack(side="top", anchor="e", pady=(4, 0))
+
+        toolbar_shell, toolbar = self._simple_card(main, padding=10, radius=20)
+        toolbar_shell.grid(row=1, column=0, sticky="ew", pady=(0, 14))
+        toolbar.columnconfigure(9, weight=1)
+        ttk.Label(toolbar, text="模式", style="Muted.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        dark = self.theme_mode.get() == "dark"
+        for column, (value, text) in enumerate((("demo", "演示"), ("monitor", "观测"), ("run", "自动调参")), start=1):
+            button = PillButton(
+                toolbar,
+                text=text,
+                command=lambda mode=value: self._set_mode(mode),
+                font_family=self.ui_font,
+                normal_bg="#1d4ed8" if dark else "#f3f7ff",
+                active_bg=self.colors["accent_active"],
+                hover_bg="#2563eb" if dark else "#dbeafe",
+                normal_fg="#dbeafe" if dark else "#334155",
+                active_fg=self.colors["accent_text"],
+                border=self.colors["border"],
+                active_border=self.colors["accent"],
+                canvas_bg=self.colors["panel"],
+            )
+            button.grid(row=0, column=column, padx=(0, 8))
+            self.mode_buttons[value] = button
+        ttk.Label(toolbar, text="计划", style="Muted.TLabel").grid(row=0, column=4, padx=(10, 8))
+        ttk.Entry(toolbar, textvariable=self.plan_path).grid(row=0, column=5, sticky="ew", padx=(0, 8), ipady=1)
+        toolbar.columnconfigure(5, weight=1)
+        self._simple_action_button(toolbar, "选择 YAML", self.browse_plan, "Quiet.TButton").grid(row=0, column=6, padx=(0, 8))
+        self._simple_action_button(toolbar, "校验", self.validate_current_plan, "Accent.TButton").grid(row=0, column=7, padx=(0, 8))
+        self._simple_action_button(toolbar, "打开记录", self.open_transcript, "Quiet.TButton").grid(row=0, column=8)
+        self._refresh_mode_chips()
+
+        content = ttk.Frame(main)
+        content.grid(row=2, column=0, sticky="nsew")
+        content.columnconfigure(0, weight=1)
+        content.rowconfigure(1, weight=1)
+
+        action_shell, action_bar = self._simple_card(content, padding=10, radius=20)
+        action_shell.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        self._add_operator_button(action_bar, "start_demo", "开始演示", self.start_demo, "Accent.TButton")
+        self._add_operator_button(action_bar, "start_monitor", "开始观测", self.start_monitor, "Accent.TButton")
+        self._add_operator_button(action_bar, "start_auto_tune", "开始调参", self.start_auto_tune, "Accent.TButton")
+        self._add_operator_button(action_bar, "pause", "暂停", self.pause_session, "Quiet.TButton")
+        self._add_operator_button(action_bar, "resume", "继续", self.resume_session, "Quiet.TButton")
+        self._add_operator_button(action_bar, "stop", "停止", self.stop, "Danger.TButton")
+        self._add_operator_button(action_bar, "emergency_stop", "急停", self.emergency_stop, "Danger.TButton")
+
+        self.notebook = ttk.Notebook(content, style="Hidden.TNotebook")
+        self.notebook.grid(row=1, column=0, sticky="nsew")
         self._build_simple_tuning_page()
         self._build_history_page()
         self._build_waveform_page()
+        self._select_simple_page("tuning")
 
         self._refresh_operator_controls()
 
@@ -783,8 +1456,8 @@ class TuningPanel(tk.Tk):
         self._small_metric_card(metrics, "接受", self.accepted_count, 0, 4)
         self._small_metric_card(metrics, "回滚", self.rollback_count, 0, 5)
 
-        tuning_card = ttk.Frame(page, style="Card.TFrame", padding=12)
-        tuning_card.grid(row=1, column=0, sticky="nsew", padx=(0, 12), pady=(0, 12))
+        tuning_shell, tuning_card = self._simple_card(page, padding=14, radius=20)
+        tuning_shell.grid(row=1, column=0, sticky="nsew", padx=(0, 12), pady=(0, 12))
         tuning_card.rowconfigure(1, weight=1)
         tuning_card.columnconfigure(0, weight=1)
         ttk.Label(tuning_card, text="调参过程", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
@@ -793,12 +1466,12 @@ class TuningPanel(tk.Tk):
         self.tuning_tree.heading("value", text="值")
         self.tuning_tree.column("#0", width=170)
         self.tuning_tree.column("value", width=470)
-        self.tuning_tree.tag_configure("oddrow", background=self.colors["panel_soft"])
-        self.tuning_tree.tag_configure("evenrow", background="#ffffff")
+        self.tuning_tree.tag_configure("oddrow", background=self.colors["row_odd"])
+        self.tuning_tree.tag_configure("evenrow", background=self.colors["row_even"])
         self.tuning_tree.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
 
-        log_card = ttk.Frame(page, style="Card.TFrame", padding=12)
-        log_card.grid(row=2, column=0, sticky="nsew", padx=(0, 12))
+        log_shell, log_card = self._simple_card(page, padding=14, radius=20)
+        log_shell.grid(row=2, column=0, sticky="nsew", padx=(0, 12))
         log_card.rowconfigure(1, weight=1)
         log_card.columnconfigure(0, weight=1)
         ttk.Label(log_card, text="上下行", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
@@ -808,7 +1481,7 @@ class TuningPanel(tk.Tk):
             height=10,
             bg=self.colors["log_bg"],
             fg=self.colors["log_fg"],
-            insertbackground="#ffffff",
+            insertbackground=self.colors["accent"],
             font=(self.mono_font, 10),
             relief="flat",
             bd=0,
@@ -816,11 +1489,11 @@ class TuningPanel(tk.Tk):
             pady=8,
             spacing1=1,
             spacing3=1,
-            selectbackground="#334155",
-            selectforeground="#ffffff",
+            selectbackground="#dbeafe",
+            selectforeground=self.colors["text"],
             highlightthickness=1,
-            highlightbackground="#243044",
-            highlightcolor="#3b82f6",
+            highlightbackground=self.colors["border"],
+            highlightcolor=self.colors["accent"],
         )
         self.log.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
         log_scroll = ttk.Scrollbar(log_card, orient="vertical", command=self.log.yview)
@@ -828,8 +1501,8 @@ class TuningPanel(tk.Tk):
         self.log.configure(yscrollcommand=log_scroll.set)
         self._configure_log_tags()
 
-        param_card = ttk.Frame(page, style="Card.TFrame", padding=12)
-        param_card.grid(row=1, column=1, sticky="nsew", pady=(0, 12))
+        param_shell, param_card = self._simple_card(page, padding=14, radius=20)
+        param_shell.grid(row=1, column=1, sticky="nsew", pady=(0, 12))
         param_card.rowconfigure(1, weight=1)
         param_card.columnconfigure(0, weight=1)
         ttk.Label(param_card, text="参数", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
@@ -842,12 +1515,12 @@ class TuningPanel(tk.Tk):
         self.param_tree.column("current", width=80, anchor="center")
         self.param_tree.column("range", width=105, anchor="center")
         self.param_tree.column("role", width=80, anchor="center")
-        self.param_tree.tag_configure("oddrow", background=self.colors["panel_soft"])
-        self.param_tree.tag_configure("evenrow", background="#ffffff")
+        self.param_tree.tag_configure("oddrow", background=self.colors["row_odd"])
+        self.param_tree.tag_configure("evenrow", background=self.colors["row_even"])
         self.param_tree.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
 
-        data_card = ttk.Frame(page, style="Card.TFrame", padding=12)
-        data_card.grid(row=2, column=1, sticky="nsew")
+        data_shell, data_card = self._simple_card(page, padding=14, radius=20)
+        data_shell.grid(row=2, column=1, sticky="nsew")
         data_card.rowconfigure(1, weight=1)
         data_card.columnconfigure(0, weight=1)
         ttk.Label(data_card, text="最新 DAT", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
@@ -856,8 +1529,8 @@ class TuningPanel(tk.Tk):
         self.dat_tree.heading("value", text="值")
         self.dat_tree.column("#0", width=160)
         self.dat_tree.column("value", width=180)
-        self.dat_tree.tag_configure("oddrow", background=self.colors["panel_soft"])
-        self.dat_tree.tag_configure("evenrow", background="#ffffff")
+        self.dat_tree.tag_configure("oddrow", background=self.colors["row_odd"])
+        self.dat_tree.tag_configure("evenrow", background=self.colors["row_even"])
         self.dat_tree.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
 
     def _build_waveform_page(self) -> None:
@@ -866,16 +1539,16 @@ class TuningPanel(tk.Tk):
         page.columnconfigure(0, weight=1)
         page.rowconfigure(0, weight=1)
 
-        chart_card = ttk.Frame(page, style="Card.TFrame", padding=12)
-        chart_card.grid(row=0, column=0, sticky="nsew")
+        chart_shell, chart_card = self._simple_card(page, padding=14, radius=20)
+        chart_shell.grid(row=0, column=0, sticky="nsew")
         chart_card.rowconfigure(1, weight=1)
         chart_card.columnconfigure(0, weight=1)
         ttk.Label(chart_card, text="波形图", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
         self.waveform_canvas = tk.Canvas(
             chart_card,
-            bg=self.colors["log_bg"],
+            bg=self.colors["panel"],
             highlightthickness=1,
-            highlightbackground="#293733",
+            highlightbackground=self.colors["border"],
         )
         self.waveform_canvas.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
         self.waveform_canvas.bind("<Configure>", lambda _event: self._draw_waveform())
@@ -958,7 +1631,10 @@ class TuningPanel(tk.Tk):
         command: Callable[[], Any],
         style: str | None = None,
     ) -> None:
-        button = ttk.Button(parent, text=text, command=command, style=style)
+        if self.ui_mode == "simple":
+            button = self._simple_action_button(parent, text, command, style)
+        else:
+            button = ttk.Button(parent, text=text, command=command, style=style)
         button.pack(side="left", padx=(0, 8))
         self.operator_buttons[name] = button
 
@@ -973,6 +1649,20 @@ class TuningPanel(tk.Tk):
         button = ttk.Button(parent, text=text, command=command, style=style)
         button.pack(side="left", padx=(0, 8))
         self.connection_buttons[name] = button
+
+    def _set_mode(self, mode: str) -> None:
+        self.mode.set(mode)
+        self._refresh_mode_chips()
+
+    def _refresh_mode_chips(self) -> None:
+        if not getattr(self, "mode_buttons", None):
+            return
+        current = self.mode.get()
+        for mode, button in self.mode_buttons.items():
+            if hasattr(button, "set_active"):
+                button.set_active(mode == current)
+            else:
+                button.configure(style="FilterActive.TButton" if mode == current else "Filter.TButton")
 
     def _build_overview_page(self) -> None:
         page = ttk.Frame(self.notebook, padding=14)
@@ -1267,7 +1957,7 @@ class TuningPanel(tk.Tk):
             height=22,
             bg=self.colors["log_bg"],
             fg=self.colors["log_fg"],
-            insertbackground="#ffffff",
+            insertbackground=self.colors["accent"],
             font=(self.mono_font, 10),
             relief="flat",
             bd=0,
@@ -1275,11 +1965,11 @@ class TuningPanel(tk.Tk):
             pady=10,
             spacing1=2,
             spacing3=2,
-            selectbackground="#334155",
-            selectforeground="#ffffff",
+            selectbackground="#dbeafe",
+            selectforeground=self.colors["text"],
             highlightthickness=1,
-            highlightbackground="#243044",
-            highlightcolor="#3b82f6",
+            highlightbackground=self.colors["border"],
+            highlightcolor=self.colors["accent"],
         )
         self.log.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
         log_scroll = ttk.Scrollbar(log_card, orient="vertical", command=self.log.yview)
@@ -1414,8 +2104,12 @@ class TuningPanel(tk.Tk):
         page.columnconfigure(0, weight=1)
         page.rowconfigure(0, weight=1)
 
-        history_card = ttk.Frame(page, style="Card.TFrame", padding=12)
-        history_card.grid(row=0, column=0, sticky="nsew")
+        if self.ui_mode == "simple":
+            history_shell, history_card = self._simple_card(page, padding=14, radius=20)
+            history_shell.grid(row=0, column=0, sticky="nsew")
+        else:
+            history_card = ttk.Frame(page, style="Card.TFrame", padding=12)
+            history_card.grid(row=0, column=0, sticky="nsew")
         history_card.rowconfigure(1, weight=1)
         history_card.columnconfigure(0, weight=1)
         ttk.Label(history_card, text="关键事件", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
@@ -1440,6 +2134,37 @@ class TuningPanel(tk.Tk):
         ttk.Label(card, textvariable=variable, style="Metric.TLabel").pack(anchor="w", pady=(5, 0))
 
     def _small_metric_card(self, parent: ttk.Frame, title: str, variable: tk.StringVar, row: int, column: int) -> None:
+        if self.ui_mode == "simple":
+            variants = (
+                (self.colors["kpi_blue"], "#1d4ed8"),
+                (self.colors["kpi_green"], "#047857"),
+                (self.colors["kpi_yellow"], "#b45309"),
+                (self.colors["kpi_purple"], "#6d28d9"),
+            )
+            fill, accent = variants[column % len(variants)]
+            shell, card = self._simple_card(parent, fill=fill, outline=fill, radius=20, padding=12)
+            shell.grid(row=row, column=column, sticky="ew", padx=(0 if column == 0 else 10, 0), pady=(0, 10))
+            card.columnconfigure(1, weight=1)
+            stripe = tk.Frame(card, bg=accent, width=5, bd=0, highlightthickness=0)
+            stripe.grid(row=0, column=0, rowspan=2, sticky="ns", padx=(0, 10), pady=1)
+            tk.Label(
+                card,
+                text=title,
+                bg=fill,
+                fg=self.colors["muted"],
+                font=(self.ui_font, 9, "bold"),
+                anchor="w",
+            ).grid(row=0, column=1, sticky="ew")
+            tk.Label(
+                card,
+                textvariable=variable,
+                bg=fill,
+                fg=self.colors["text"],
+                font=(self.ui_font, 14, "bold"),
+                anchor="w",
+            ).grid(row=1, column=1, sticky="ew", pady=(5, 0))
+            return
+
         card = ttk.Frame(parent, style="Card.TFrame", padding=12)
         card.grid(row=row, column=column, sticky="ew", padx=(0 if column == 0 else 10, 0), pady=(0, 10))
         ttk.Label(card, text=title, style="Muted.TLabel").pack(anchor="w")
@@ -1447,11 +2172,11 @@ class TuningPanel(tk.Tk):
 
     def _configure_log_tags(self) -> None:
         mono_bold = (self.mono_font, 10, "bold")
-        self.log.tag_configure("TX", foreground="#38bdf8", font=mono_bold)
-        self.log.tag_configure("RX", foreground="#4ade80")
-        self.log.tag_configure("DAT", foreground="#facc15")
-        self.log.tag_configure("ERR", foreground="#fb7185", font=mono_bold)
-        self.log.tag_configure("ROUND", foreground="#c4b5fd", font=mono_bold)
+        self.log.tag_configure("TX", foreground="#2563eb", font=mono_bold)
+        self.log.tag_configure("RX", foreground="#059669")
+        self.log.tag_configure("DAT", foreground="#d97706")
+        self.log.tag_configure("ERR", foreground="#e11d48", font=mono_bold)
+        self.log.tag_configure("ROUND", foreground="#7c3aed", font=mono_bold)
         self.log.tag_configure("INFO", foreground=self.colors["log_fg"])
 
     def browse_plan(self) -> None:
@@ -2568,6 +3293,7 @@ class TuningPanel(tk.Tk):
 
         self._set_operator_button_enabled("start_monitor", can_start)
         self._set_operator_button_enabled("start_auto_tune", can_start)
+        self._set_operator_button_enabled("start_demo", can_start)
         self._set_operator_button_enabled("pause", can_control_session and state != "paused")
         self._set_operator_button_enabled("resume", session_running and state == "paused")
         self._set_operator_button_enabled("skip_current_param", can_control_session and current_key is not None)
@@ -2577,11 +3303,15 @@ class TuningPanel(tk.Tk):
         self._set_operator_button_enabled("emergency_stop", running and state not in {"stopped", "error"})
 
     def start_monitor(self) -> None:
-        self.mode.set("monitor")
+        self._set_mode("monitor")
         self.start()
 
     def start_auto_tune(self) -> None:
-        self.mode.set("run")
+        self._set_mode("run")
+        self.start()
+
+    def start_demo(self) -> None:
+        self._set_mode("demo")
         self.start()
 
     def start(self) -> None:
@@ -3053,22 +3783,26 @@ class TuningPanel(tk.Tk):
         plot_right = width - margin_right
         plot_top = margin_top
         plot_bottom = height - margin_bottom
+        dark = self.theme_mode.get() == "dark"
+        grid_major = "#1e3a8a" if dark else "#c7d2fe"
+        grid_minor = "#173b7a" if dark else "#dbeafe"
+        axis_color = "#60a5fa" if dark else "#2563eb"
 
         for i in range(5):
             y = plot_top + (plot_bottom - plot_top) * i / 4
-            canvas.create_line(plot_left, y, plot_right, y, fill="#2a3733")
+            canvas.create_line(plot_left, y, plot_right, y, fill=grid_major)
         for i in range(6):
             x = plot_left + (plot_right - plot_left) * i / 5
-            canvas.create_line(x, plot_top, x, plot_bottom, fill="#1d2825")
-        canvas.create_line(plot_left, plot_bottom, plot_right, plot_bottom, fill="#70837d")
-        canvas.create_line(plot_left, plot_top, plot_left, plot_bottom, fill="#70837d")
+            canvas.create_line(x, plot_top, x, plot_bottom, fill=grid_minor)
+        canvas.create_line(plot_left, plot_bottom, plot_right, plot_bottom, fill=axis_color)
+        canvas.create_line(plot_left, plot_top, plot_left, plot_bottom, fill=axis_color)
 
         if len(self.waveform_samples) < 2:
             canvas.create_text(
                 width / 2,
                 height / 2,
                 text="等待 DAT",
-                fill="#8fa19b",
+                fill=self.colors["muted"],
                 font=(self.ui_font, 12, "bold"),
             )
             return
@@ -3079,7 +3813,7 @@ class TuningPanel(tk.Tk):
                 if key not in ordered_keys:
                     ordered_keys.append(key)
         keys = ordered_keys[:4]
-        colors = [self.colors["accent"], self.colors["success"], self.colors["warning"], self.colors["danger"]]
+        colors = ["#3b82f6", self.colors["success"], self.colors["warning"], "#8b5cf6"]
 
         for key_index, key in enumerate(keys):
             values = [sample[key] for sample in self.waveform_samples if key in sample]
@@ -3106,7 +3840,7 @@ class TuningPanel(tk.Tk):
                 14,
                 text=str(key),
                 anchor="w",
-                fill=self.colors["log_fg"],
+                fill=self.colors["text"],
                 font=(self.ui_font, 9),
             )
 

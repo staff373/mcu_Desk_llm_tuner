@@ -57,6 +57,12 @@ class TuningPanelEventRenderingTests(unittest.TestCase):
             try:
                 tab_labels = [app.notebook.tab(tab_id, "text") for tab_id in app.notebook.tabs()]
                 self.assertEqual(tab_labels, ["调参", "历史", "波形"])
+                self.assertEqual(app.notebook.cget("style"), "Hidden.TNotebook")
+                self.assertIn("start_demo", app.operator_buttons)
+                self.assertEqual(set(app.simple_nav_buttons), {"tuning", "history", "waveform"})
+                app._select_simple_page("history")
+                self.assertEqual(app.simple_active_page, "history")
+                self.assertEqual(app.notebook.tab(app.notebook.select(), "text"), "历史")
 
                 events = [
                     TuningEvent("tx", "SET kp_x 370", {"command": "SET kp_x 370"}),
@@ -120,6 +126,31 @@ class TuningPanelEventRenderingTests(unittest.TestCase):
 
                 self.assertIn("mystery", app.log.get("1.0", "end"))
                 self.assertIn("事件", tree_column_values(app.history_tree, 1))
+            finally:
+                app.destroy()
+
+        self.assertEqual(SerialShouldNotOpen.opened_ports, [])
+
+    def test_simple_theme_toggle_rebuilds_dashboard_without_native_tabs(self) -> None:
+        with patch.object(tuning_session.serial, "Serial", SerialShouldNotOpen):
+            app = self._create_panel()
+            try:
+                self.assertEqual(app.theme_mode.get(), "light")
+                self.assertIsNotNone(app.theme_button)
+                self.assertEqual(app.theme_button.cget("text"), "\u2600")
+                self.assertNotEqual(app.operator_buttons["start_demo"].foreground, "#ffffff")
+
+                app._select_simple_page("waveform")
+                app.theme_button.invoke()
+                app.update_idletasks()
+
+                self.assertEqual(app.theme_mode.get(), "dark")
+                self.assertIsNotNone(app.theme_button)
+                self.assertEqual(app.theme_button.cget("text"), "\u263e")
+                self.assertEqual(app.notebook.cget("style"), "Hidden.TNotebook")
+                self.assertEqual(app.simple_active_page, "waveform")
+                self.assertEqual(app.notebook.tab(app.notebook.select(), "text"), "波形")
+                self.assertNotEqual(app.operator_buttons["start_demo"].foreground, "#ffffff")
             finally:
                 app.destroy()
 
