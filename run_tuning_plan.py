@@ -52,10 +52,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return execute_plan(plan, args.plan, args.log_dir, serial_trace=not args.quiet_serial)
     except serial.SerialException as exc:
-        print(f"ERROR: serial port failure: {exc}", file=sys.stderr)
+        print(f"ERROR: serial port failure [serial_exception]: {exc}", file=sys.stderr)
         return 2
     except ExecutionError as exc:
-        print(f"ERROR: execution failed: {exc}", file=sys.stderr)
+        code = getattr(exc, "code", None)
+        if code:
+            print(f"ERROR: execution failed [{code}]: {exc}", file=sys.stderr)
+        else:
+            print(f"ERROR: execution failed: {exc}", file=sys.stderr)
         return 2
 
 

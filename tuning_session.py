@@ -50,6 +50,9 @@ class CommandResult:
     ok: bool
     lines: list[str] = field(default_factory=list)
     error: str | None = None
+    category: str | None = None
+    code: str | None = None
+    recoverable: bool = False
 
 
 @dataclass
@@ -88,10 +91,26 @@ class TrialResult:
     improvement: float | None
     hard_failures: list[str]
     telemetry: TelemetryResult
+    failure_messages: dict[str, str] = field(default_factory=dict)
 
 
 class ExecutionError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        category: str = "hard_failure",
+        code: str = "hard_failure",
+        recoverable: bool = False,
+        action: str = "run",
+        context: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.category = category
+        self.code = code
+        self.recoverable = recoverable
+        self.action = action
+        self.context = dict(context or {})
 
 
 class StopRequested(RuntimeError):
@@ -135,6 +154,10 @@ class ConsoleEventRenderer:
             return
         if event.type == "warning":
             print(f"WARN: {event.message}")
+            return
+        if event.type == "error":
+            code = event.data.get("code") or event.data.get("error_code") or "unknown"
+            print(f"ERROR [{code}]: {event.message}")
             return
         if event.type == "summary":
             print("Summary:")
@@ -214,15 +237,35 @@ def send_command(
     require_ok: bool = True,
     event_handler: EventHandler | None = None,
 ) -> CommandResult:
-    ser.reset_input_buffer()
-    ser.write(encode_command(command, line_ending))
-    ser.flush()
+    try:
+        ser.reset_input_buffer()
+        ser.write(encode_command(command, line_ending))
+        ser.flush()
+    except serial.SerialException as exc:
+        return CommandResult(
+            False,
+            [],
+            f"serial exception during `{command}`: {exc}",
+            "serial_exception",
+            "serial_exception",
+            False,
+        )
     emit_event(event_handler, "tx", command, command=command)
 
     deadline = time.monotonic() + timeout_ms / 1000.0
     lines: list[str] = []
     while time.monotonic() < deadline:
-        raw = ser.readline()
+        try:
+            raw = ser.readline()
+        except serial.SerialException as exc:
+            return CommandResult(
+                False,
+                lines,
+                f"serial exception during `{command}`: {exc}",
+                "serial_exception",
+                "serial_exception",
+                False,
+            )
         if not raw:
             continue
         line = decode_line(raw)
@@ -231,12 +274,26 @@ def send_command(
         lines.append(line)
         emit_event(event_handler, "rx", line, line=line)
         if any(pattern and pattern in line for pattern in error_patterns):
-            return CommandResult(False, lines, f"error response after `{command}`: {line}")
+            return CommandResult(
+                False,
+                lines,
+                f"error response after `{command}`: {line}",
+                "hard_failure",
+                "command_error_response",
+                False,
+            )
         if ok_pattern and ok_pattern in line:
             return CommandResult(True, lines)
 
     if require_ok:
-        return CommandResult(False, lines, f"OK timeout after `{command}`")
+        return CommandResult(
+            False,
+            lines,
+            f"OK timeout after `{command}`",
+            "ok_timeout",
+            "ok_timeout",
+            True,
+        )
     return CommandResult(True, lines)
 
 
@@ -497,6 +554,26 @@ def score_window(plan: dict[str, Any], telemetry: TelemetryResult) -> tuple[floa
     return score, hard_failures
 
 
+def standard_error_fields(failure: str) -> tuple[str, str, bool]:
+    if failure == "serial_exception":
+        return "serial_exception", "serial_exception", False
+    if failure == "ok_timeout":
+        return "ok_timeout", "ok_timeout", True
+    if failure == "readback_status_failed":
+        return "ok_timeout", "readback_status_failed", True
+    if failure == "readback_mismatch":
+        return "readback_mismatch", "readback_mismatch", True
+    if failure == "malformed_telemetry":
+        return "malformed_telemetry", "malformed_telemetry", False
+    if failure == "rollback_failed":
+        return "rollback_failed", "rollback_failed", False
+    if failure.startswith("score_eval_error"):
+        return "hard_failure", "score_eval_error", False
+    if failure == "no_telemetry":
+        return "hard_failure", "no_telemetry", False
+    return "hard_failure", "hard_failure", False
+
+
 def log_record(log_path: Path, record: dict[str, Any]) -> None:
     with log_path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -582,6 +659,8 @@ class TuningSession:
         event = TuningEvent(event_type, message, dict(data))
         if event_type == "state":
             event.data.setdefault("timestamp", event.timestamp)
+        if event_type == "error":
+            event.data.setdefault("message", event.message)
         if self._should_log_event(event):
             if self.log_path is not None:
                 log_record(self.log_path, event.to_record())
@@ -591,8 +670,112 @@ class TuningSession:
             self.event_handler(event)
 
     def _should_log_event(self, event: TuningEvent) -> bool:
-        return event.type == "state" or (
+        return event.type in {"state", "error"} or (
             event.type == "action" and event.data.get("action") == "set_runtime_limits"
+        )
+
+    def _emit_error_event(
+        self,
+        category: str,
+        code: str,
+        message: str,
+        *,
+        recoverable: bool,
+        action: str,
+        **context: Any,
+    ) -> None:
+        data: dict[str, Any] = {
+            "category": category,
+            "code": code,
+            "error_code": code,
+            "recoverable": recoverable,
+            "state": self.state,
+            "action": action,
+            "session_id": self.session_id,
+        }
+        if context:
+            data["context"] = context
+        self.emit("error", message, **data)
+
+    def _execution_error(
+        self,
+        message: str,
+        *,
+        category: str,
+        code: str,
+        recoverable: bool,
+        action: str,
+        **context: Any,
+    ) -> ExecutionError:
+        return ExecutionError(
+            message,
+            category=category,
+            code=code,
+            recoverable=recoverable,
+            action=action,
+            context=context,
+        )
+
+    def _emit_command_error(
+        self,
+        result: CommandResult,
+        *,
+        action: str,
+        message: str | None = None,
+        **context: Any,
+    ) -> None:
+        category = result.category or "hard_failure"
+        code = result.code or category
+        error_message = message or result.error or f"{action} failed."
+        self._emit_error_event(
+            category,
+            code,
+            error_message,
+            recoverable=result.recoverable,
+            action=action,
+            lines=list(result.lines),
+            **context,
+        )
+
+    def _emit_trial_failure_error(
+        self,
+        trial: TrialResult,
+        failure: str,
+        *,
+        action: str,
+        **context: Any,
+    ) -> None:
+        category, code, recoverable = standard_error_fields(failure)
+        message = trial.failure_messages.get(failure) or f"{action} failed: {failure}"
+        self._emit_error_event(
+            category,
+            code,
+            message,
+            recoverable=recoverable,
+            action=action,
+            hard_failures=list(trial.hard_failures),
+            **context,
+        )
+
+    def _emit_failures_as_error(
+        self,
+        failures: list[str],
+        *,
+        action: str,
+        message_prefix: str,
+        **context: Any,
+    ) -> None:
+        if not failures:
+            return
+        category, code, recoverable = standard_error_fields(failures[0])
+        self._emit_error_event(
+            category,
+            code,
+            f"{message_prefix}: {', '.join(failures)}",
+            recoverable=recoverable,
+            action=action,
+            hard_failures=list(failures),
+            **context,
         )
 
     def _reject_action(self, action: str, code: str, message: str, **data: Any) -> ActionResult:
@@ -1155,6 +1338,14 @@ class TuningSession:
                     error_code="rollback_failed",
                     **data,
                 )
+                self._emit_error_event(
+                    "rollback_failed",
+                    "rollback_failed",
+                    message,
+                    recoverable=False,
+                    action="rollback_to",
+                    **data,
+                )
                 return ActionResult(
                     ok=False,
                     action="rollback_to",
@@ -1245,7 +1436,14 @@ class TuningSession:
             if not status.ok:
                 return status
             if commands.get("readback_required") and not status_confirms_value(status.lines, key, value):
-                return CommandResult(False, status.lines, f"rollback readback mismatch for {key}")
+                return CommandResult(
+                    False,
+                    status.lines,
+                    f"rollback readback mismatch for {key}",
+                    "readback_mismatch",
+                    "readback_mismatch",
+                    True,
+                )
         return result
 
     def stop_device(self, ser: serial.Serial) -> None:
@@ -1297,7 +1495,15 @@ class TuningSession:
             event_handler=self.event_handler,
         )
         if not set_result.ok:
-            return TrialResult("rollback", None, None, ["ok_timeout"], TelemetryResult([], 0, set_result.lines))
+            failure = set_result.code or "ok_timeout"
+            return TrialResult(
+                "rollback",
+                None,
+                None,
+                [failure],
+                TelemetryResult([], 0, set_result.lines),
+                {failure: set_result.error or "SET command failed."},
+            )
 
         if commands.get("readback_required"):
             status = send_command(
@@ -1311,16 +1517,39 @@ class TuningSession:
                 event_handler=self.event_handler,
             )
             if not status.ok:
-                return TrialResult("rollback", None, None, ["readback_status_failed"], TelemetryResult([], 0, status.lines))
+                failure = status.code or "readback_status_failed"
+                return TrialResult(
+                    "rollback",
+                    None,
+                    None,
+                    [failure],
+                    TelemetryResult([], 0, status.lines),
+                    {failure: status.error or "Readback STATUS failed."},
+                )
             readback_key = param.get("readback_key") or param["key"]
             if not status_confirms_value(status.lines, readback_key, trial_value):
-                return TrialResult("rollback", None, None, ["readback_mismatch"], TelemetryResult([], 0, status.lines))
+                message = f"readback mismatch for {readback_key}: expected {trial_value:g}"
+                return TrialResult(
+                    "rollback",
+                    None,
+                    None,
+                    ["readback_mismatch"],
+                    TelemetryResult([], 0, status.lines),
+                    {"readback_mismatch": message},
+                )
 
         time.sleep(float(runtime_limits["cooldown_ms"]) / 1000.0)
         telemetry = collect_telemetry(ser, self.plan, int(runtime_limits["trial_window_ms"]), self.event_handler)
         score, hard_failures = score_window(self.plan, telemetry)
         if score is None:
-            return TrialResult("rollback", None, None, hard_failures, telemetry)
+            return TrialResult(
+                "rollback",
+                None,
+                None,
+                hard_failures,
+                telemetry,
+                {failure: f"trial failed: {failure}" for failure in hard_failures},
+            )
 
         improvement = improvement_ratio(baseline_score, score, bool(scoring["lower_is_better"]))
         if hard_failures:
@@ -1331,7 +1560,14 @@ class TuningSession:
             decision = "rollback"
         else:
             decision = "hold"
-        return TrialResult(decision, score, improvement, hard_failures, telemetry)
+        return TrialResult(
+            decision,
+            score,
+            improvement,
+            hard_failures,
+            telemetry,
+            {failure: f"trial failed: {failure}" for failure in hard_failures},
+        )
 
     def run(self) -> int:
         log_path = self._prepare_log_path()
@@ -1350,7 +1586,29 @@ class TuningSession:
 
         self.emit("info", f"Opening serial port {transport['port']} @ {transport['baudrate']}...")
 
-        with serial.Serial(**serial_kwargs(transport)) as ser:
+        try:
+            serial_handle = serial.Serial(**serial_kwargs(transport))
+        except serial.SerialException as exc:
+            message = f"serial port failure: {exc}"
+            self._set_state(self.STATE_ERROR, "serial_exception")
+            self._emit_error_event(
+                "serial_exception",
+                "serial_exception",
+                message,
+                recoverable=False,
+                action="open_serial",
+                port=transport.get("port"),
+            )
+            raise self._execution_error(
+                message,
+                category="serial_exception",
+                code="serial_exception",
+                recoverable=False,
+                action="open_serial",
+                port=transport.get("port"),
+            ) from exc
+
+        with serial_handle as ser:
             self._active_serial = ser
             self._set_state(self.STATE_CONNECTED, "serial_opened")
             if not self.stop_requested:
@@ -1366,7 +1624,15 @@ class TuningSession:
                 )
                 if not status.ok:
                     self._set_state(self.STATE_ERROR, "initial_status_failed")
-                    raise ExecutionError(status.error or "initial STATUS failed")
+                    self._emit_command_error(status, action="status", command=commands["status"])
+                    raise self._execution_error(
+                        status.error or "initial STATUS failed",
+                        category=status.category or "hard_failure",
+                        code=status.code or "initial_status_failed",
+                        recoverable=status.recoverable,
+                        action="status",
+                        command=commands["status"],
+                    )
 
             if not self.stop_requested and commands.get("telemetry_on"):
                 start = send_command(
@@ -1381,7 +1647,15 @@ class TuningSession:
                 )
                 if not start.ok:
                     self._set_state(self.STATE_ERROR, "telemetry_on_failed")
-                    raise ExecutionError(start.error or "telemetry_on failed")
+                    self._emit_command_error(start, action="telemetry_on", command=commands["telemetry_on"])
+                    raise self._execution_error(
+                        start.error or "telemetry_on failed",
+                        category=start.category or "hard_failure",
+                        code=start.code or "telemetry_on_failed",
+                        recoverable=start.recoverable,
+                        action="telemetry_on",
+                        command=commands["telemetry_on"],
+                    )
 
             try:
                 self._wait_if_paused()
@@ -1400,7 +1674,25 @@ class TuningSession:
                 self.baseline_score, baseline_failures = score_window(self.plan, baseline_telemetry)
                 if self.baseline_score is None:
                     self._set_state(self.STATE_ERROR, "baseline_failed")
-                    raise ExecutionError(f"baseline failed: {', '.join(baseline_failures)}")
+                    self._emit_failures_as_error(
+                        baseline_failures,
+                        action="baseline",
+                        message_prefix="baseline failed",
+                        telemetry_summary={
+                            "samples": len(baseline_telemetry.samples),
+                            "malformed_count": baseline_telemetry.malformed_count,
+                        },
+                    )
+                    category, code, recoverable = standard_error_fields(
+                        baseline_failures[0] if baseline_failures else "hard_failure"
+                    )
+                    raise self._execution_error(
+                        f"baseline failed: {', '.join(baseline_failures)}",
+                        category=category,
+                        code=code,
+                        recoverable=recoverable,
+                        action="baseline",
+                    )
                 self.final_score = self.baseline_score
                 self.baseline_parameters = dict(self.current)
                 self.emit(
@@ -1547,6 +1839,17 @@ class TuningSession:
                         if not rollback.ok:
                             self.stop_reason = "rollback_failed"
                             self._set_state(self.STATE_ERROR, "rollback_failed")
+                            self._emit_error_event(
+                                "rollback_failed",
+                                "rollback_failed",
+                                f"Rollback failed for {key}: {rollback.error}",
+                                recoverable=False,
+                                action="rollback",
+                                key=key,
+                                round=round_index,
+                                rollback_status=rollback_status,
+                                lines=list(rollback.lines),
+                            )
                             break
 
                     record = {
@@ -1570,6 +1873,16 @@ class TuningSession:
                     self.emit("record", "", record=record)
 
                     if trial.hard_failures:
+                        self._emit_trial_failure_error(
+                            trial,
+                            trial.hard_failures[0],
+                            action="run_trial",
+                            key=key,
+                            round=round_index,
+                            decision=trial.decision,
+                            rollback_status=rollback_status,
+                            telemetry_summary=record["telemetry_summary"],
+                        )
                         self.stop_reason = "hard_failure"
                         break
                     if self.stop_requested:

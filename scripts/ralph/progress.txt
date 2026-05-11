@@ -15,6 +15,7 @@ Started: 2026-05-11 12:00:00
 - Manual rollback controls require `baseline_parameters` and an active session serial handle; keep the missing-baseline guard before active-connection checks so invalid controls stay no-hardware.
 - Active parameter selection is session-scoped through `TuningSession.active_parameter_keys`; do not mutate `plan["step_policy"]["parameter_order"]` or source YAML-derived structures.
 - Runtime execution should read `max_rounds`, `trial_window_ms`, and `cooldown_ms` through `_effective_runtime_limits()` so session-scoped overrides do not mutate YAML-derived `plan`.
+- Standardized session failures should emit `error` events with `category`, `code`, `error_code`, `recoverable`, `state`, `action`, and `session_id`; these events are also JSONL records.
 
 ## 2026-05-11 12:14:10 - US-001
 - Implemented stable `TuningSessionState` values and readable `TuningSession.state`, initialized to `idle` without opening serial.
@@ -138,4 +139,17 @@ Started: 2026-05-11 12:00:00
 - Learnings for future iterations:
   - Runtime limit overrides are stored in `TuningSession.runtime_limit_overrides` and surfaced through `summary()["runtime_limit_overrides"]`, `yaml_runtime_limits`, and `effective_runtime_limits`.
   - Pre-run override action events are deferred until `log_path` exists so JSONL contains the metadata even when the action is emitted before `run()`.
+---
+
+## 2026-05-11 13:27:44 - US-011
+- Implemented standardized `error` events for serial exceptions, OK timeouts, readback mismatches, malformed telemetry, rollback failures, and hard failures.
+- Added `ExecutionError` metadata and CLI output codes so human-readable failures include the same stable code where practical.
+- Files changed: `tuning_session.py`, `run_tuning_plan.py`, `test_tuning_session_error_events.py`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`, `project_status.md`, `.project_checkpoints/US-011/20260511-132419/`.
+- Verification commands and results: `python -m py_compile tuning_session.py run_tuning_plan.py test_tuning_session_error_events.py` passed; `python -m unittest test_tuning_session_error_events.py` passed with 6 tests; full session compile set passed; full session unittest set passed with 31 tests; `python run_tuning_plan.py --help` passed.
+- Checkpoint path: `.project_checkpoints/US-011/20260511-132419/`
+- Real serial status: not opened
+- Learnings for future iterations:
+  - Error events are logged by `_should_log_event` and can be asserted by parsing the session JSONL for records where `type == "error"`.
+  - `CommandResult` now carries optional `category`, `code`, and `recoverable` fields, while `TrialResult.failure_messages` preserves the decisive failure text for later event emission.
+  - CLI callers can read `ExecutionError.code` when presenting a failure without parsing free-form messages.
 ---

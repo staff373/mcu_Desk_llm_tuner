@@ -176,7 +176,7 @@
         "Tests pass for each standardized error type using fake or virtual transport inputs."
       ],
       "priority": 11,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
