@@ -28,7 +28,7 @@ except ImportError as exc:  # pragma: no cover - script layout dependent
     raise SystemExit(3) from exc
 
 try:
-    from tuning_session import PySerialTransport, TuningEvent, TuningSession
+    from tuning_session import PySerialTransport, TuningEvent, TuningSession, format_template
 except ImportError as exc:  # pragma: no cover - script layout dependent
     print("ERROR: tuning_session.py must be in the same scripts directory.", file=sys.stderr)
     raise SystemExit(3) from exc
@@ -179,6 +179,8 @@ class TuningPanel(tk.Tk):
         self.parameter_axis = tk.StringVar(value="")
         self.parameter_group = tk.StringVar(value="")
         self.parameter_keys_text = tk.StringVar(value="")
+        self.safety_status = tk.StringVar(value="未加载安全规则")
+        self.command_preview_status = tk.StringVar(value="未加载命令预览")
 
         self.plan: dict[str, Any] | None = None
         self.validated_plan_path: Path | None = None
@@ -193,6 +195,9 @@ class TuningPanel(tk.Tk):
         self.parameter_trial_values: dict[str, Any] = {}
         self.parameter_active_keys: list[str] | None = None
         self.parameter_skipped_keys: set[str] = set()
+        self.safety_triggered_rules: set[str] = set()
+        self.command_preview: dict[str, str] = {"source": "-", "command": "-", "detail": "未加载 YAML 计划"}
+        self.last_sent_command: dict[str, str] = {"source": "-", "command": "-", "detail": "尚未发送"}
         self.connection_transport: Any | None = None
         self.session_transport_factory = session_transport_factory
         self.run_backend = run_backend or os.environ.get("MCU_TUNING_PANEL_RUN_BACKEND", "session")
@@ -394,6 +399,7 @@ class TuningPanel(tk.Tk):
         self._build_overview_page()
         self._build_connection_page()
         self._build_parameter_page()
+        self._build_safety_page()
         self._build_plan_page()
         self._build_monitor_page()
         self._build_tuning_page()
@@ -600,6 +606,74 @@ class TuningPanel(tk.Tk):
         self.parameter_tree.configure(yscrollcommand=scroll.set)
         self._refresh_parameter_tree()
 
+    def _build_safety_page(self) -> None:
+        page = ttk.Frame(self.notebook, padding=14)
+        self.safety_page = page
+        self.notebook.add(page, text="安全")
+        page.columnconfigure(0, weight=1)
+        page.rowconfigure(0, weight=2)
+        page.rowconfigure(1, weight=1)
+
+        safety_card = ttk.Frame(page, style="Card.TFrame", padding=12)
+        safety_card.grid(row=0, column=0, sticky="nsew", pady=(0, 14))
+        safety_card.rowconfigure(1, weight=1)
+        safety_card.columnconfigure(0, weight=1)
+        ttk.Label(safety_card, text="安全规则与运行限制", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(safety_card, textvariable=self.safety_status, style="Muted.TLabel").grid(
+            row=0,
+            column=0,
+            sticky="e",
+        )
+        self.safety_tree = ttk.Treeview(
+            safety_card,
+            columns=("value", "status"),
+            show="tree headings",
+            height=12,
+        )
+        self.safety_tree.heading("#0", text="规则")
+        self.safety_tree.heading("value", text="YAML 值")
+        self.safety_tree.heading("status", text="运行状态")
+        self.safety_tree.column("#0", width=300)
+        self.safety_tree.column("value", width=520)
+        self.safety_tree.column("status", width=120, anchor="center")
+        self.safety_tree.tag_configure("oddrow", background=self.colors["panel_soft"])
+        self.safety_tree.tag_configure("evenrow", background="#ffffff")
+        self.safety_tree.tag_configure("triggered", background="#fee2e2", foreground=self.colors["danger"])
+        self.safety_tree.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
+        safety_scroll = ttk.Scrollbar(safety_card, orient="vertical", command=self.safety_tree.yview)
+        safety_scroll.grid(row=1, column=1, sticky="ns", pady=(10, 0))
+        self.safety_tree.configure(yscrollcommand=safety_scroll.set)
+
+        preview_card = ttk.Frame(page, style="Card.TFrame", padding=12)
+        preview_card.grid(row=1, column=0, sticky="nsew")
+        preview_card.rowconfigure(1, weight=1)
+        preview_card.columnconfigure(0, weight=1)
+        ttk.Label(preview_card, text="YAML 命令预览", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(preview_card, textvariable=self.command_preview_status, style="Muted.TLabel").grid(
+            row=0,
+            column=0,
+            sticky="e",
+        )
+        self.command_preview_tree = ttk.Treeview(
+            preview_card,
+            columns=("phase", "source", "command", "detail"),
+            show="headings",
+            height=4,
+        )
+        self.command_preview_tree.heading("phase", text="阶段")
+        self.command_preview_tree.heading("source", text="来源")
+        self.command_preview_tree.heading("command", text="命令")
+        self.command_preview_tree.heading("detail", text="状态")
+        self.command_preview_tree.column("phase", width=150, anchor="center")
+        self.command_preview_tree.column("source", width=180, anchor="center")
+        self.command_preview_tree.column("command", width=300)
+        self.command_preview_tree.column("detail", width=360)
+        self.command_preview_tree.tag_configure("preview", background="#eff6ff")
+        self.command_preview_tree.tag_configure("sent", background=self.colors["panel_soft"])
+        self.command_preview_tree.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
+        self._populate_safety_tree(None)
+        self._refresh_command_preview_tree()
+
     def _build_plan_page(self) -> None:
         page = ttk.Frame(self.notebook, padding=14)
         self.notebook.add(page, text="计划")
@@ -790,6 +864,9 @@ class TuningPanel(tk.Tk):
             self.validated_plan_path = None
             self._populate_plan_tree(None)
             self._populate_connection_tree(None)
+            self.safety_triggered_rules = set()
+            self._populate_safety_tree(None)
+            self._reset_command_preview()
             self._clear_parameter_metadata("计划缺失")
             self.connection_state.set("未连接")
             self.connection_detail.set("请先校验 YAML 计划")
@@ -805,6 +882,9 @@ class TuningPanel(tk.Tk):
             self.validated_plan_path = None
             self._populate_plan_tree(None)
             self._populate_connection_tree(None)
+            self.safety_triggered_rules = set()
+            self._populate_safety_tree(None)
+            self._reset_command_preview()
             self._clear_parameter_metadata("校验失败")
             self.connection_state.set("未连接")
             self.connection_detail.set("YAML 校验失败")
@@ -817,6 +897,9 @@ class TuningPanel(tk.Tk):
             self.validated_plan_path = None
             self._populate_plan_tree(plan)
             self._populate_connection_tree(plan)
+            self.safety_triggered_rules = set()
+            self._populate_safety_tree(None)
+            self._reset_command_preview()
             self._clear_parameter_metadata("校验失败")
             self.connection_state.set("未连接")
             self.connection_detail.set("YAML 校验失败")
@@ -843,6 +926,9 @@ class TuningPanel(tk.Tk):
         self._refresh_parameter_tree()
         self._populate_plan_tree(plan)
         self._populate_connection_tree(plan)
+        self.safety_triggered_rules = set()
+        self._populate_safety_tree(plan)
+        self._reset_command_preview()
         self._refresh_tuning_tree()
 
     def _load_demo_params(self) -> None:
@@ -855,6 +941,9 @@ class TuningPanel(tk.Tk):
         self._refresh_overview_parameter_tree()
         self._refresh_parameter_tree()
         self._populate_demo_plan_tree()
+        self.safety_triggered_rules = set()
+        self._populate_safety_tree(demo_plan)
+        self._reset_command_preview()
         self._refresh_tuning_tree()
 
     def _populate_demo_plan_tree(self) -> None:
@@ -1035,6 +1124,361 @@ class TuningPanel(tk.Tk):
                 ),
                 tags=(tag,),
             )
+
+    def _safety_row_tags(self, row_id: str, index: int) -> tuple[str, ...]:
+        row_tag = "evenrow" if index % 2 == 0 else "oddrow"
+        triggered = row_id in self.safety_triggered_rules or any(
+            trigger.startswith(f"{row_id}.") for trigger in self.safety_triggered_rules
+        )
+        return (row_tag, "triggered") if triggered else (row_tag,)
+
+    def _safety_row_status(self, row_id: str) -> str:
+        triggered = row_id in self.safety_triggered_rules or any(
+            trigger.startswith(f"{row_id}.") for trigger in self.safety_triggered_rules
+        )
+        return "触发" if triggered else "正常"
+
+    def _populate_safety_tree(self, plan: dict[str, Any] | None) -> None:
+        if not hasattr(self, "safety_tree"):
+            return
+        self.safety_tree.delete(*self.safety_tree.get_children())
+        row_index = 0
+
+        def insert(parent: str, row_id: str, label: str, value: Any = "", open_item: bool = False) -> str:
+            nonlocal row_index
+            tags = self._safety_row_tags(row_id, row_index)
+            row_index += 1
+            return str(
+                self.safety_tree.insert(
+                    parent,
+                    "end",
+                    iid=row_id,
+                    text=label,
+                    values=(self._display_value(value), self._safety_row_status(row_id)),
+                    tags=tags,
+                    open=open_item,
+                )
+            )
+
+        if plan is None:
+            insert("", "safety.unloaded", "未加载安全规则", "请先校验 YAML 计划", True)
+            self.safety_status.set("未加载安全规则")
+            return
+
+        limits_id = insert("", "limits", "运行限制", "", True)
+        transport = plan.get("transport", {})
+        telemetry = plan.get("telemetry", {})
+        scoring = plan.get("scoring", {})
+        step_policy = plan.get("step_policy", {})
+        for row_id, label, value in (
+            ("transport.read_timeout_ms", "transport.read_timeout_ms", transport.get("read_timeout_ms")),
+            ("transport.write_timeout_ms", "transport.write_timeout_ms", transport.get("write_timeout_ms")),
+            ("telemetry.sample_period_ms", "telemetry.sample_period_ms", telemetry.get("sample_period_ms")),
+            ("scoring.baseline_window_ms", "scoring.baseline_window_ms", scoring.get("baseline_window_ms")),
+            ("scoring.trial_window_ms", "scoring.trial_window_ms", scoring.get("trial_window_ms")),
+            ("step_policy.max_rounds", "step_policy.max_rounds", step_policy.get("max_rounds")),
+            ("step_policy.cooldown_ms", "step_policy.cooldown_ms", step_policy.get("cooldown_ms")),
+        ):
+            insert(limits_id, row_id, label, value)
+
+        for param in self._ordered_plan_parameters(plan):
+            key = str(param.get("key", "-"))
+            insert(limits_id, f"parameters.{key}.range", f"{key} range", f"{param.get('min', '-')}..{param.get('max', '-')}")
+            insert(limits_id, f"parameters.{key}.max_delta_per_round", f"{key} max_delta", param.get("max_delta_per_round"))
+
+        stop_id = insert("", "stop_conditions", "停止条件", "", True)
+        stop_conditions = plan.get("stop_conditions", {})
+        if isinstance(stop_conditions, dict) and stop_conditions:
+            for key, value in stop_conditions.items():
+                insert(stop_id, f"stop_conditions.{key}", f"stop_conditions.{key}", value)
+        else:
+            insert(stop_id, "stop_conditions.unset", "stop_conditions", "未定义")
+
+        hard_id = insert("", "hard_failures", "Hard failure 规则", "", True)
+        hard_failures = scoring.get("hard_failures", [])
+        if isinstance(hard_failures, list) and hard_failures:
+            for index, rule in enumerate(hard_failures):
+                insert(hard_id, f"scoring.hard_failures.{index}", f"hard_failure[{index}]", rule)
+        else:
+            insert(hard_id, "scoring.hard_failures.unset", "hard_failures", "未定义")
+
+        telemetry_id = insert("", "telemetry_safety", "安全遥测字段", "", True)
+        safety_fields = []
+        for field in telemetry.get("fields", []):
+            if not isinstance(field, dict):
+                continue
+            name = str(field.get("name", ""))
+            role = str(field.get("role", ""))
+            if role == "safety" or name in {"lost", "sat"}:
+                safety_fields.append(field)
+        if safety_fields:
+            for field in safety_fields:
+                name = str(field.get("name"))
+                value = f"role={field.get('role', '-')}, type={field.get('type', '-')}, unit={field.get('unit', '-')}"
+                insert(telemetry_id, f"telemetry.{name}", f"telemetry.{name}", value)
+        else:
+            insert(telemetry_id, "telemetry_safety.unset", "安全遥测字段", "未定义")
+
+        triggered_count = len(self.safety_triggered_rules)
+        self.safety_status.set(f"规则就绪：{max(row_index - 4, 0)} 条；触发：{triggered_count} 条")
+
+    def _refresh_command_preview_tree(self) -> None:
+        if not hasattr(self, "command_preview_tree"):
+            return
+        self.command_preview_tree.delete(*self.command_preview_tree.get_children())
+        rows = [
+            ("next", "下一条 YAML 命令", self.command_preview, "preview"),
+            ("last", "最近 TX", self.last_sent_command, "sent"),
+        ]
+        for row_id, phase, payload, tag in rows:
+            self.command_preview_tree.insert(
+                "",
+                "end",
+                iid=row_id,
+                values=(
+                    phase,
+                    payload.get("source", "-"),
+                    payload.get("command", "-"),
+                    payload.get("detail", "-"),
+                ),
+                tags=(tag,),
+            )
+
+    def _set_command_preview(self, source: str, command: Any, detail: str) -> None:
+        command_text = self._display_value(command)
+        self.command_preview = {
+            "source": source or "-",
+            "command": command_text,
+            "detail": detail,
+        }
+        self.command_preview_status.set(f"{source}: {command_text}" if source and command_text != "-" else detail)
+        self._refresh_command_preview_tree()
+
+    def _set_last_sent_command(self, source: str, command: Any, detail: str) -> None:
+        self.last_sent_command = {
+            "source": source or "-",
+            "command": self._display_value(command),
+            "detail": detail,
+        }
+        self._refresh_command_preview_tree()
+
+    def _reset_command_preview(self) -> None:
+        self.last_sent_command = {"source": "-", "command": "-", "detail": "尚未发送"}
+        if self.plan is None:
+            self._set_command_preview("-", "-", "未加载 YAML 计划")
+            return
+        self._preview_static_command("status", "计划校验后下一条会话命令")
+
+    def _preview_static_command(self, command_key: str, detail: str) -> None:
+        if self.plan is None:
+            self._set_command_preview("-", "-", "未加载 YAML 计划")
+            return
+        command = self.plan.get("commands", {}).get(command_key)
+        if command:
+            self._set_command_preview(f"commands.{command_key}", command, detail)
+        else:
+            self._set_command_preview("-", "-", f"YAML 未定义 commands.{command_key}")
+
+    def _format_yaml_command(self, command_key: str, key: Any = None, value: Any = None) -> str | None:
+        if self.plan is None:
+            return None
+        template = self.plan.get("commands", {}).get(command_key)
+        if not template:
+            return None
+        template_text = str(template)
+        if "{key" in template_text or "{value" in template_text:
+            if key is None or value is None:
+                return None
+            try:
+                return format_template(template_text, str(key), value)
+            except (ValueError, TypeError):
+                try:
+                    return template_text.format(key=str(key), value=value)
+                except Exception:
+                    return None
+        return template_text
+
+    def _format_rollback_preview_command(self, key: Any, value: Any) -> str | None:
+        if self.plan is None:
+            return None
+        template = self.plan.get("rollback", {}).get("command_template")
+        if not template:
+            return None
+        try:
+            return format_template(str(template), str(key), value)
+        except (ValueError, TypeError):
+            try:
+                return str(template).format(key=str(key), value=value)
+            except Exception:
+                return None
+
+    def _preview_set_command(self, key: Any, value: Any, detail: str) -> None:
+        command = self._format_yaml_command("set", key, value)
+        if command is None:
+            self._set_command_preview("-", "-", "无法从 YAML commands.set 生成预览")
+            return
+        self._set_command_preview("commands.set", command, detail)
+
+    def _source_for_sent_command(self, command: str) -> str:
+        if self.plan is None:
+            return "-"
+        commands = self.plan.get("commands", {})
+        for key in ("status", "telemetry_on", "telemetry_off", "stop"):
+            if command == str(commands.get(key, "")):
+                return f"commands.{key}"
+        set_template = str(commands.get("set", ""))
+        set_prefix = set_template.split("{key", 1)[0] if "{key" in set_template else set_template
+        if set_prefix and command.startswith(set_prefix):
+            return "commands.set"
+        rollback_template = str(self.plan.get("rollback", {}).get("command_template", ""))
+        rollback_prefix = rollback_template.split("{key", 1)[0] if "{key" in rollback_template else rollback_template
+        if rollback_prefix and command.startswith(rollback_prefix):
+            return "rollback.command_template"
+        return "YAML-derived"
+
+    def _preview_after_sent_command(self, source: str) -> None:
+        if source == "commands.status":
+            if self.plan and self.plan.get("commands", {}).get("telemetry_on"):
+                self._preview_static_command("telemetry_on", "STATUS 后的下一条 YAML 命令")
+            return
+        if source == "commands.telemetry_on":
+            self._set_command_preview("-", "-", "采集基线遥测，不发送新命令")
+            return
+        if source == "commands.set":
+            if self.plan and self.plan.get("commands", {}).get("readback_required"):
+                self._preview_static_command("status", "SET 后的 YAML readback 命令")
+            else:
+                self._set_command_preview("-", "-", "等待试验遥测，不发送新命令")
+            return
+        if source == "commands.telemetry_off":
+            self._preview_static_command("stop", "telemetry_off 后的 YAML stop 命令")
+            return
+        if source == "commands.stop":
+            self._set_command_preview("-", "-", "停止命令已发送，无待发送 YAML 命令")
+
+    def _mark_safety_triggers(self, row_ids: list[str], detail: str) -> None:
+        new_ids = [row_id for row_id in row_ids if row_id and row_id not in self.safety_triggered_rules]
+        if not new_ids:
+            return
+        self.safety_triggered_rules.update(new_ids)
+        self._populate_safety_tree(self.plan)
+        self._add_history_event("安全", detail)
+
+    def _hard_failure_row_ids_for(self, failure_or_field: str) -> list[str]:
+        if self.plan is None:
+            return []
+        target = str(failure_or_field)
+        row_ids: list[str] = []
+        hard_failures = self.plan.get("scoring", {}).get("hard_failures", [])
+        if not isinstance(hard_failures, list):
+            return row_ids
+        for index, rule in enumerate(hard_failures):
+            rule_text = str(rule)
+            if target == rule_text or re.search(rf"\b{re.escape(target)}\b", rule_text):
+                row_ids.append(f"scoring.hard_failures.{index}")
+        return row_ids
+
+    def _truthy_safety_value(self, value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            return value.strip().lower() not in {"", "0", "false", "none", "no"}
+        return bool(value)
+
+    def _is_plan_safety_field(self, field_name: str) -> bool:
+        if self.plan is None:
+            return False
+        for field in self.plan.get("telemetry", {}).get("fields", []):
+            if not isinstance(field, dict):
+                continue
+            if str(field.get("name")) == field_name and str(field.get("role", "")) == "safety":
+                return True
+        return False
+
+    def _update_safety_from_sample(self, sample: dict[str, Any]) -> None:
+        row_ids: list[str] = []
+        triggered_fields: list[str] = []
+        for key, value in sample.items():
+            field = str(key)
+            if field not in {"lost", "sat"} and not self._is_plan_safety_field(field):
+                continue
+            if not self._truthy_safety_value(value):
+                continue
+            triggered_fields.append(field)
+            row_ids.append(f"telemetry.{field}")
+            row_ids.extend(self._hard_failure_row_ids_for(field))
+        if triggered_fields:
+            row_ids.append("stop_conditions.unsafe_behavior")
+            self._mark_safety_triggers(row_ids, f"安全遥测触发：{', '.join(triggered_fields)}")
+
+    def _update_safety_from_structured_event(self, event: TuningEvent, line: str) -> None:
+        row_ids: list[str] = []
+        data = event.data
+        if event.type == "dat":
+            sample = data.get("sample")
+            if isinstance(sample, dict):
+                self._update_safety_from_sample(sample)
+            return
+        if event.type == "decision":
+            hard_failures = data.get("hard_failures", [])
+            if isinstance(hard_failures, list):
+                for failure in hard_failures:
+                    row_ids.extend(self._hard_failure_row_ids_for(str(failure)))
+                if hard_failures:
+                    row_ids.append("stop_conditions.unsafe_behavior")
+                    self._mark_safety_triggers(row_ids, f"决策触发 hard failure：{', '.join(map(str, hard_failures))}")
+            return
+        if event.type == "error":
+            category = str(data.get("category", ""))
+            code = str(data.get("code") or data.get("error_code") or "")
+            if category == "ok_timeout" or code == "ok_timeout":
+                row_ids.append("stop_conditions.communication_failure")
+            if category in {"malformed_telemetry", "hard_failure"} or code in {"malformed_telemetry", "hard_failure"}:
+                row_ids.append("stop_conditions.unsafe_behavior")
+            context = data.get("context", {})
+            hard_failures = data.get("hard_failures")
+            if hard_failures is None and isinstance(context, dict):
+                hard_failures = context.get("hard_failures")
+            if isinstance(hard_failures, list):
+                for failure in hard_failures:
+                    row_ids.extend(self._hard_failure_row_ids_for(str(failure)))
+            if row_ids:
+                self._mark_safety_triggers(row_ids, f"错误事件触发安全规则：{line}")
+
+    def _update_command_preview_from_structured_event(self, event: TuningEvent) -> None:
+        if event.type == "state":
+            next_state = str(event.data.get("next_state", ""))
+            if next_state == "connected":
+                self._preview_static_command("status", "connected 后发送前预览")
+            elif next_state == "baseline":
+                self._set_command_preview("-", "-", "采集基线遥测，不发送新命令")
+            elif next_state == "tuning":
+                self._set_command_preview("-", "-", "等待下一轮参数事件")
+            elif next_state == "stopping":
+                if self.plan and self.plan.get("commands", {}).get("telemetry_off"):
+                    self._preview_static_command("telemetry_off", "stopping 清理发送前预览")
+                else:
+                    self._preview_static_command("stop", "stopping 清理发送前预览")
+            elif next_state in {"stopped", "error"}:
+                self._set_command_preview("-", "-", f"{next_state} 状态无待发送 YAML 命令")
+            return
+        if event.type == "round":
+            key = event.data.get("key")
+            trial_value = event.data.get("trial_value")
+            if key is not None and trial_value is not None:
+                round_index = event.data.get("round", "-")
+                self._preview_set_command(key, trial_value, f"第 {round_index} 轮发送前预览")
+            return
+        if event.type == "tx":
+            command = str(event.data.get("command") or event.message).strip()
+            source = self._source_for_sent_command(command)
+            self._set_last_sent_command(source, command, "已由会话发送")
+            self._preview_after_sent_command(source)
+            return
+        if event.type == "summary":
+            self._set_command_preview("-", "-", "会话已总结，无待发送 YAML 命令")
 
     def _reject_parameter_selection(self, detail: str) -> bool:
         self.parameter_selection_status.set(f"选择拒绝：{detail}")
@@ -1575,6 +2019,8 @@ class TuningPanel(tk.Tk):
     def _handle_session_event(self, event: TuningEvent) -> None:
         line = self._session_event_to_line(event)
         self._append_log_line(line, self._session_event_log_tag(event))
+        self._update_command_preview_from_structured_event(event)
+        self._update_safety_from_structured_event(event, line)
         self._update_from_session_event(event, line)
         self._sync_parameter_state_from_session()
         self._refresh_parameter_tree()
@@ -1795,6 +2241,12 @@ class TuningPanel(tk.Tk):
 
     def _update_from_line(self, line: str) -> None:
         lower_line = line.lower()
+        tx_match = re.search(r"\bTX\s+(.+)", line)
+        if tx_match:
+            command = tx_match.group(1).strip()
+            source = self._source_for_sent_command(command)
+            self._set_last_sent_command(source, command, "已由文本输出发送")
+            self._preview_after_sent_command(source)
         score_match = re.search(r"score=([-+]?\d+(?:\.\d+)?)", line)
         if score_match:
             self.score.set(score_match.group(1))
@@ -1809,6 +2261,7 @@ class TuningPanel(tk.Tk):
         trial_match = re.search(r"(?:Round|第)\s*\d+\s*(?:轮)?[:：]\s*([A-Za-z0-9_.-]+)\s*->\s*([-+]?\d+(?:\.\d+)?)", line)
         if trial_match:
             self.parameter_trial_values[trial_match.group(1)] = trial_match.group(2)
+            self._preview_set_command(trial_match.group(1), trial_match.group(2), "文本输出解析的发送前预览")
             self._refresh_parameter_tree()
         if lower_line.startswith("accept") or " accept:" in lower_line:
             self.decision.set("接受")
@@ -1858,6 +2311,7 @@ class TuningPanel(tk.Tk):
             except json.JSONDecodeError:
                 return
             self._update_dat_tree(sample)
+            self._update_safety_from_sample(sample)
 
     def _update_dat_tree(self, sample: dict[str, Any]) -> None:
         self.dat_tree.delete(*self.dat_tree.get_children())
@@ -1981,6 +2435,9 @@ class TuningPanel(tk.Tk):
         self.parameter_baseline_values = {}
         self.parameter_trial_values = {}
         self.parameter_skipped_keys = set()
+        self.safety_triggered_rules = set()
+        self._populate_safety_tree(self.plan)
+        self._reset_command_preview()
         if self.parameter_metadata_by_key:
             self.parameter_last_stable_values = dict(self.parameter_current_values)
             self._refresh_parameter_tree()

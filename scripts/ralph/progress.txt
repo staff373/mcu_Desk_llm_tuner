@@ -27,6 +27,7 @@ Started: 2026-05-11 12:00:00
 - GUI operator controls are keyed in `TuningPanel.operator_buttons` and should refresh through `_refresh_operator_controls()`; fake-session tests can assign `session` and `session_worker` directly without opening serial.
 - GUI connection controls are keyed in `TuningPanel.connection_buttons` and refresh through `_refresh_connection_controls()`; port detection must stay enumeration-only and must not open or command a serial port.
 - GUI parameter selection is session-scoped in `TuningPanel.parameter_active_keys`; `SessionWorker` applies it with `TuningSession.set_active_parameters(...)` before `run()` so YAML-derived plans are not mutated.
+- GUI safety and YAML command preview surfaces live in `TuningPanel.safety_tree` and `TuningPanel.command_preview_tree`; structured `round` events preview YAML `commands.set` before TX, while `dat`, `decision`, and `error` events drive safety highlighting.
 
 ## 2026-05-11 12:14:10 - US-001
 - Implemented stable `TuningSessionState` values and readable `TuningSession.state`, initialized to `idle` without opening serial.
@@ -318,4 +319,18 @@ Started: 2026-05-11 12:00:00
   - Parameter-page tests can patch `tuning_session.serial.Serial` and use structured `TuningEvent` objects to exercise runtime value updates without starting a real transport.
   - Axis selection is inferred from parameter `group` or key suffixes such as `x_axis`, `y_axis`, `kp_x`, and `kd_y`.
   - Keep parameter participation state in GUI state only until a direct session worker is created; the worker applies the selection to `TuningSession` without editing source YAML-derived data.
+---
+
+## 2026-05-11 15:47:15 - US-024
+- Implemented a dedicated GUI safety page that displays YAML-derived runtime limits, stop conditions, communication timeouts, hard failure rules, and safety telemetry fields.
+- Added YAML command preview rows for the next derived command before TX and the most recent TX, without adding any free-form serial text input path.
+- Added structured-event handling so `round` events preview `commands.set`, `tx` events record sent commands, and `dat`/`decision`/`error` events highlight triggered safety rules.
+- Files changed: `tuning_panel.py`, `test_tuning_panel_safety_preview.py`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`, `project_status.md`, `.project_checkpoints/US-024/20260511-154133/`.
+- Verification commands and results: `python -m py_compile tuning_panel.py tuning_session.py test_tuning_panel_safety_preview.py` passed; `python -m unittest test_tuning_panel_safety_preview.py` passed with 2 tests; `python tuning_panel.py --self-test` passed; `python tuning_panel.py --hidden-init-test` passed; `python validate_plan.py .\fixtures\virtual_mcu_tuning_plan.yaml` passed with `RESULT: valid`; `python run_tuning_plan.py --help` passed; `python monitor_tuning_plan.py --help` passed; `python -m unittest discover -p "test_tuning_panel*.py"` passed with 19 tests; `python -m unittest discover -p "test_*.py"` passed with 67 tests; `python agent_console_probe.py --log-dir .project_checkpoints\US-024\20260511-154133\probe_artifacts --summary .project_checkpoints\US-024\20260511-154133\probe_artifacts\summary.json --report .project_checkpoints\US-024\20260511-154133\probe_artifacts\report.json` exited 0 with `real_serial_status=not opened`.
+- Checkpoint path: `.project_checkpoints/US-024/20260511-154133/`
+- Real serial status: not opened
+- Learnings for future iterations:
+  - Command preview should stay derived from YAML templates and structured session events; keep arbitrary serial send controls out of this page.
+  - Safety highlighting can be tested by injecting `TuningEvent` objects directly into `TuningPanel._handle_session_event(...)` while patching `tuning_session.serial.Serial`.
+  - The virtual fixture's `lost` and `sat` safety fields map cleanly to `stop_conditions.unsafe_behavior` and scoring hard-failure rows.
 ---

@@ -389,7 +389,7 @@
         "Tests pass for preview generation, safety event highlighting, and no free-text command path."
       ],
       "priority": 24,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
