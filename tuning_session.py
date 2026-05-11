@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Protocol, runtime_checkable
 
 try:
     import serial
@@ -214,6 +214,119 @@ def serial_kwargs(transport: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+@runtime_checkable
+class SessionTransport(Protocol):
+    @property
+    def timeout(self) -> float | None:
+        ...
+
+    @timeout.setter
+    def timeout(self, value: float | None) -> None:
+        ...
+
+    @property
+    def write_timeout(self) -> float | None:
+        ...
+
+    @write_timeout.setter
+    def write_timeout(self, value: float | None) -> None:
+        ...
+
+    def open(self) -> "SessionTransport":
+        ...
+
+    def reset_input_buffer(self) -> None:
+        ...
+
+    def write(self, payload: bytes) -> int:
+        ...
+
+    def flush(self) -> None:
+        ...
+
+    def readline(self) -> bytes:
+        ...
+
+    def close(self) -> None:
+        ...
+
+    def __enter__(self) -> "SessionTransport":
+        ...
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        ...
+
+
+TransportFactory = Callable[[dict[str, Any]], SessionTransport]
+
+
+class PySerialTransport:
+    def __init__(self, options: dict[str, Any]) -> None:
+        self.options = dict(options)
+        self._serial: Any | None = None
+
+    @classmethod
+    def from_config(cls, transport: dict[str, Any]) -> "PySerialTransport":
+        return cls(serial_kwargs(transport))
+
+    @property
+    def timeout(self) -> float | None:
+        if self._serial is not None:
+            return getattr(self._serial, "timeout", self.options.get("timeout"))
+        return self.options.get("timeout")
+
+    @timeout.setter
+    def timeout(self, value: float | None) -> None:
+        self.options["timeout"] = value
+        if self._serial is not None:
+            self._serial.timeout = value
+
+    @property
+    def write_timeout(self) -> float | None:
+        if self._serial is not None:
+            return getattr(self._serial, "write_timeout", self.options.get("write_timeout"))
+        return self.options.get("write_timeout")
+
+    @write_timeout.setter
+    def write_timeout(self, value: float | None) -> None:
+        self.options["write_timeout"] = value
+        if self._serial is not None:
+            self._serial.write_timeout = value
+
+    def open(self) -> SessionTransport:
+        if self._serial is None:
+            self._serial = serial.Serial(**self.options)
+        return self
+
+    def _require_open(self) -> Any:
+        if self._serial is None:
+            raise serial.SerialException("transport is not open")
+        return self._serial
+
+    def reset_input_buffer(self) -> None:
+        self._require_open().reset_input_buffer()
+
+    def write(self, payload: bytes) -> int:
+        return self._require_open().write(payload)
+
+    def flush(self) -> None:
+        self._require_open().flush()
+
+    def readline(self) -> bytes:
+        return self._require_open().readline()
+
+    def close(self) -> None:
+        if self._serial is not None:
+            self._serial.close()
+            self._serial = None
+
+    def __enter__(self) -> SessionTransport:
+        return self.open()
+
+    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+        self.close()
+
+
 def encode_command(command: str, line_ending: str) -> bytes:
     return f"{command}{line_ending}".encode("utf-8")
 
@@ -228,7 +341,7 @@ def emit_event(handler: EventHandler | None, event_type: str, message: str = "",
 
 
 def send_command(
-    ser: serial.Serial,
+    ser: SessionTransport,
     command: str,
     line_ending: str,
     ok_pattern: str,
@@ -336,7 +449,7 @@ def parse_telemetry_line(line: str, telemetry: dict[str, Any]) -> dict[str, Any]
 
 
 def collect_telemetry(
-    ser: serial.Serial,
+    ser: SessionTransport,
     plan: dict[str, Any],
     duration_ms: int,
     event_handler: EventHandler | None = None,
@@ -598,11 +711,13 @@ class TuningSession:
         plan_path: Path,
         log_dir: Path | None = None,
         event_handler: EventHandler | None = None,
+        transport_factory: TransportFactory | None = None,
     ) -> None:
         self.plan = plan
         self.plan_path = plan_path
         self.log_dir = log_dir
         self.event_handler = event_handler
+        self.transport_factory = transport_factory or PySerialTransport.from_config
         self.stop_requested = False
         self.pause_requested = False
         self._paused_return_state: str | None = None
@@ -610,7 +725,7 @@ class TuningSession:
         self.state = self.STATE_IDLE
         self.current_parameter_key: str | None = None
         self.current_round_index: int | None = None
-        self._active_serial: serial.Serial | None = None
+        self._active_serial: SessionTransport | None = None
         self.baseline_parameters: dict[str, float] | None = None
         self.active_parameter_keys: list[str] | None = None
         self.runtime_limit_overrides: dict[str, int | float] = {}
@@ -1405,7 +1520,7 @@ class TuningSession:
         self._pending_log_records.clear()
         return self.log_path
 
-    def execute_rollback(self, ser: serial.Serial, key: str, value: Number) -> CommandResult:
+    def execute_rollback(self, ser: SessionTransport, key: str, value: Number) -> CommandResult:
         commands = self.plan["commands"]
         rollback = self.plan["rollback"]
         transport = self.plan["transport"]
@@ -1446,7 +1561,7 @@ class TuningSession:
                 )
         return result
 
-    def stop_device(self, ser: serial.Serial) -> None:
+    def stop_device(self, ser: SessionTransport) -> None:
         commands = self.plan["commands"]
         transport = self.plan["transport"]
         for key in ["telemetry_off", "stop"]:
@@ -1473,7 +1588,7 @@ class TuningSession:
 
     def run_trial(
         self,
-        ser: serial.Serial,
+        ser: SessionTransport,
         param: dict[str, Any],
         trial_value: float,
         baseline_score: float,
@@ -1587,7 +1702,7 @@ class TuningSession:
         self.emit("info", f"Opening serial port {transport['port']} @ {transport['baudrate']}...")
 
         try:
-            serial_handle = serial.Serial(**serial_kwargs(transport))
+            serial_handle = self.transport_factory(transport).open()
         except serial.SerialException as exc:
             message = f"serial port failure: {exc}"
             self._set_state(self.STATE_ERROR, "serial_exception")
