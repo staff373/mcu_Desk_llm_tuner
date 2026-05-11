@@ -63,7 +63,7 @@ class TuningPanelSafetyPreviewTests(unittest.TestCase):
 
     def _create_panel(self) -> TuningPanel:
         try:
-            app = TuningPanel(run_backend="session")
+            app = TuningPanel(run_backend="session", ui_mode="advanced")
         except tk.TclError as exc:
             self.skipTest(f"Tk hidden initialization unavailable: {exc}")
         app.withdraw()

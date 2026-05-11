@@ -64,7 +64,11 @@ class TuningPanelSessionReplayTests(unittest.TestCase):
 
     def _create_panel(self, *, transport_factory=None) -> TuningPanel:
         try:
-            app = TuningPanel(run_backend="session", session_transport_factory=transport_factory)
+            app = TuningPanel(
+                run_backend="session",
+                session_transport_factory=transport_factory,
+                ui_mode="advanced",
+            )
         except tk.TclError as exc:
             self.skipTest(f"Tk hidden initialization unavailable: {exc}")
         app.withdraw()

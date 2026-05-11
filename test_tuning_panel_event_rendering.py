@@ -55,6 +55,9 @@ class TuningPanelEventRenderingTests(unittest.TestCase):
         with patch.object(tuning_session.serial, "Serial", SerialShouldNotOpen):
             app = self._create_panel()
             try:
+                tab_labels = [app.notebook.tab(tab_id, "text") for tab_id in app.notebook.tabs()]
+                self.assertEqual(tab_labels, ["调参", "历史", "波形"])
+
                 events = [
                     TuningEvent("tx", "SET kp_x 370", {"command": "SET kp_x 370"}),
                     TuningEvent("rx", "OK", {"line": "OK"}),

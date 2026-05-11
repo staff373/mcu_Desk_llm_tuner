@@ -390,10 +390,14 @@ class TuningPanel(tk.Tk):
         *,
         run_backend: str | None = None,
         session_transport_factory: TransportFactory | None = None,
+        ui_mode: str | None = None,
     ) -> None:
         super().__init__()
-        self.title("MCU 蓝牙调参面板")
-        self.geometry("1180x760")
+        self.ui_mode = ui_mode or os.environ.get("MCU_TUNING_PANEL_UI", "simple")
+        if self.ui_mode not in {"simple", "advanced"}:
+            self.ui_mode = "simple"
+        self.title("MCU 调参控制台" if self.ui_mode == "simple" else "MCU 蓝牙调参面板")
+        self.geometry("1120x720" if self.ui_mode == "simple" else "1180x760")
         self.minsize(980, 640)
 
         self.plan_path = tk.StringVar()
@@ -452,24 +456,29 @@ class TuningPanel(tk.Tk):
         self.output_queue: queue.Queue[Any] = queue.Queue()
         self.stop_requested = False
         self.demo_index = 0
+        self.waveform_samples: list[dict[str, float]] = []
         self.transcript_handle: Any | None = None
         self.ui_font = self._pick_font(("Microsoft YaHei UI", "Segoe UI", "Arial"))
         self.mono_font = self._pick_font(("Cascadia Mono", "Consolas", "Courier New"))
         self.colors = {
-            "bg": "#f5f7fb",
-            "panel": "#ffffff",
-            "panel_soft": "#f8fafc",
-            "header": "#101827",
-            "header_subtle": "#d6deeb",
-            "text": "#111827",
-            "muted": "#64748b",
-            "border": "#dbe3ef",
-            "accent": "#2563eb",
-            "accent_active": "#1d4ed8",
-            "danger": "#dc2626",
-            "danger_active": "#b91c1c",
-            "log_bg": "#111827",
-            "log_fg": "#dbe4f0",
+            "bg": "#edf1ee",
+            "panel": "#fbfcfa",
+            "panel_soft": "#f4f7f5",
+            "header": "#141a18",
+            "header_subtle": "#aebdb7",
+            "text": "#15201d",
+            "muted": "#66736f",
+            "border": "#d5ddd8",
+            "accent": "#087f8c",
+            "accent_active": "#0f6b73",
+            "danger": "#c2410c",
+            "danger_active": "#9a3412",
+            "warning": "#d97706",
+            "success": "#2f9e44",
+            "rail": "#18211f",
+            "rail_soft": "#22302d",
+            "log_bg": "#111715",
+            "log_fg": "#d9e3df",
         }
         self._configure_fonts()
 
@@ -510,6 +519,9 @@ class TuningPanel(tk.Tk):
         style.theme_use("clam")
         style.configure("TFrame", background=self.colors["bg"])
         style.configure("Card.TFrame", background=self.colors["panel"], relief="flat")
+        style.configure("Surface.TFrame", background=self.colors["panel_soft"], relief="flat")
+        style.configure("Rail.TFrame", background=self.colors["rail"], relief="flat")
+        style.configure("RailSoft.TFrame", background=self.colors["rail_soft"], relief="flat")
         style.configure(
             "Header.TLabel",
             background=self.colors["header"],
@@ -527,6 +539,43 @@ class TuningPanel(tk.Tk):
             background=self.colors["panel"],
             foreground=self.colors["text"],
             font=(self.ui_font, 11, "bold"),
+        )
+        style.configure(
+            "HeroTitle.TLabel",
+            background=self.colors["header"],
+            foreground="#ffffff",
+            font=(self.ui_font, 17, "bold"),
+        )
+        style.configure(
+            "RailTitle.TLabel",
+            background=self.colors["rail"],
+            foreground="#f8faf8",
+            font=(self.ui_font, 13, "bold"),
+        )
+        style.configure(
+            "RailMuted.TLabel",
+            background=self.colors["rail"],
+            foreground="#aebdb7",
+            font=(self.ui_font, 9),
+        )
+        style.configure(
+            "RailValue.TLabel",
+            background=self.colors["rail_soft"],
+            foreground="#f8faf8",
+            font=(self.ui_font, 11, "bold"),
+        )
+        style.configure(
+            "RailCaption.TLabel",
+            background=self.colors["rail_soft"],
+            foreground="#b7c7c1",
+            font=(self.ui_font, 9),
+        )
+        style.configure(
+            "Pill.TLabel",
+            background="#e6f5f3",
+            foreground=self.colors["accent"],
+            font=(self.ui_font, 9, "bold"),
+            padding=(10, 4),
         )
         style.configure(
             "Metric.TLabel",
@@ -550,23 +599,27 @@ class TuningPanel(tk.Tk):
         style.configure("FooterValue.TLabel", background=self.colors["bg"], foreground=self.colors["text"], font=(self.ui_font, 9))
         style.configure("TEntry", fieldbackground="#ffffff", bordercolor=self.colors["border"], padding=(8, 5), font=(self.ui_font, 10))
         style.configure("TRadiobutton", background=self.colors["panel"], foreground=self.colors["text"], font=(self.ui_font, 10))
+        style.configure("Rail.TRadiobutton", background=self.colors["rail"], foreground="#f8faf8", font=(self.ui_font, 10))
         style.map("TRadiobutton", background=[("active", self.colors["panel"])])
+        style.map("Rail.TRadiobutton", background=[("active", self.colors["rail_soft"])], foreground=[("active", "#ffffff")])
         style.configure("TButton", font=(self.ui_font, 10), padding=(12, 7), borderwidth=0)
         style.configure("Accent.TButton", background=self.colors["accent"], foreground="#ffffff", font=(self.ui_font, 10, "bold"))
         style.map("Accent.TButton", background=[("active", self.colors["accent_active"])])
         style.configure("Danger.TButton", background=self.colors["danger"], foreground="#ffffff", font=(self.ui_font, 10, "bold"))
         style.map("Danger.TButton", background=[("active", self.colors["danger_active"])])
+        style.configure("Quiet.TButton", background="#e8eee9", foreground=self.colors["text"], font=(self.ui_font, 10), padding=(12, 7))
+        style.map("Quiet.TButton", background=[("active", "#dbe6df")])
         style.configure("TNotebook", background=self.colors["bg"], borderwidth=0)
         style.configure(
             "TNotebook.Tab",
-            background="#e8eef7",
-            foreground="#334155",
+            background="#dde6e1",
+            foreground="#33413d",
             font=(self.ui_font, 10, "bold"),
             padding=(18, 9),
         )
         style.map(
             "TNotebook.Tab",
-            background=[("selected", self.colors["panel"]), ("active", "#f1f5f9")],
+            background=[("selected", self.colors["panel"]), ("active", "#eef4f0")],
             foreground=[("selected", self.colors["text"]), ("active", self.colors["text"])],
         )
         style.configure(
@@ -588,6 +641,247 @@ class TuningPanel(tk.Tk):
         style.map("Treeview", background=[("selected", "#dbeafe")], foreground=[("selected", self.colors["text"])])
 
     def _build_ui(self) -> None:
+        if self.ui_mode == "advanced":
+            self._build_advanced_ui()
+            return
+        self._build_simple_ui()
+
+    def _build_simple_ui(self) -> None:
+        header = tk.Frame(self, bg=self.colors["header"], height=76)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+        header.columnconfigure(0, weight=1)
+        title_block = tk.Frame(header, bg=self.colors["header"])
+        title_block.grid(row=0, column=0, sticky="w", padx=22, pady=(12, 0))
+        ttk.Label(title_block, text="MCU 调参控制台", style="HeroTitle.TLabel").pack(anchor="w")
+        ttk.Label(title_block, text="过程、历史、得分与波形集中在一个清爽工作台。", style="SubHeader.TLabel").pack(
+            anchor="w",
+            pady=(4, 0),
+        )
+        status_block = tk.Frame(header, bg=self.colors["header"])
+        status_block.grid(row=0, column=1, sticky="e", padx=22, pady=(16, 0))
+        ttk.Label(status_block, textvariable=self.status, style="Pill.TLabel").pack(side="right")
+        ttk.Label(status_block, text="当前状态", style="SubHeader.TLabel").pack(side="right", padx=(0, 10))
+
+        main = ttk.Frame(self, padding=14)
+        main.pack(fill="both", expand=True)
+        main.columnconfigure(0, minsize=286)
+        main.columnconfigure(1, weight=1)
+        main.rowconfigure(0, weight=1)
+
+        rail = ttk.Frame(main, style="Rail.TFrame", padding=16)
+        rail.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
+        rail.columnconfigure(0, weight=1)
+        ttk.Label(rail, text="Session", style="RailTitle.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(rail, text="只保留启动、校验和人工干预。", style="RailMuted.TLabel").grid(
+            row=1,
+            column=0,
+            sticky="w",
+            pady=(4, 14),
+        )
+
+        plan_card = ttk.Frame(rail, style="RailSoft.TFrame", padding=12)
+        plan_card.grid(row=2, column=0, sticky="ew", pady=(0, 12))
+        plan_card.columnconfigure(0, weight=1)
+        ttk.Label(plan_card, text="调参计划", style="RailCaption.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Entry(plan_card, textvariable=self.plan_path).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 8))
+        ttk.Button(plan_card, text="选择 YAML", command=self.browse_plan, style="Quiet.TButton").grid(
+            row=2,
+            column=0,
+            sticky="ew",
+            padx=(0, 6),
+        )
+        ttk.Button(plan_card, text="校验", command=self.validate_current_plan, style="Accent.TButton").grid(
+            row=2,
+            column=1,
+            sticky="ew",
+        )
+
+        mode_card = ttk.Frame(rail, style="Rail.TFrame")
+        mode_card.grid(row=3, column=0, sticky="ew", pady=(0, 12))
+        ttk.Label(mode_card, text="运行模式", style="RailMuted.TLabel").pack(anchor="w", pady=(0, 8))
+        ttk.Radiobutton(mode_card, text="演示", variable=self.mode, value="demo", style="Rail.TRadiobutton").pack(anchor="w", pady=(0, 6))
+        ttk.Radiobutton(mode_card, text="观测", variable=self.mode, value="monitor", style="Rail.TRadiobutton").pack(anchor="w", pady=(0, 6))
+        ttk.Radiobutton(mode_card, text="自动调参", variable=self.mode, value="run", style="Rail.TRadiobutton").pack(anchor="w")
+
+        action_card = ttk.Frame(rail, style="RailSoft.TFrame", padding=12)
+        action_card.grid(row=4, column=0, sticky="ew", pady=(0, 12))
+        ttk.Label(action_card, text="动作", style="RailCaption.TLabel").pack(anchor="w", pady=(0, 8))
+        primary_actions = ttk.Frame(action_card, style="RailSoft.TFrame")
+        primary_actions.pack(fill="x")
+        self._add_operator_button(primary_actions, "start_monitor", "开始观测", self.start_monitor, "Accent.TButton")
+        self.operator_buttons["start_monitor"].pack_configure(side="top", fill="x", pady=(0, 8), padx=0)
+        self._add_operator_button(primary_actions, "start_auto_tune", "开始调参", self.start_auto_tune, "Accent.TButton")
+        self.operator_buttons["start_auto_tune"].pack_configure(side="top", fill="x", pady=(0, 10), padx=0)
+
+        sub_actions = ttk.Frame(action_card, style="RailSoft.TFrame")
+        sub_actions.pack(fill="x")
+        sub_actions.columnconfigure((0, 1), weight=1)
+        self.operator_buttons["pause"] = ttk.Button(sub_actions, text="暂停", command=self.pause_session, style="Quiet.TButton")
+        self.operator_buttons["pause"].grid(row=0, column=0, sticky="ew", padx=(0, 6), pady=(0, 8))
+        self.operator_buttons["resume"] = ttk.Button(sub_actions, text="继续", command=self.resume_session, style="Quiet.TButton")
+        self.operator_buttons["resume"].grid(row=0, column=1, sticky="ew", pady=(0, 8))
+        self.operator_buttons["stop"] = ttk.Button(sub_actions, text="停止", command=self.stop, style="Danger.TButton")
+        self.operator_buttons["stop"].grid(row=1, column=0, sticky="ew", padx=(0, 6))
+        self.operator_buttons["emergency_stop"] = ttk.Button(
+            sub_actions,
+            text="急停",
+            command=self.emergency_stop,
+            style="Danger.TButton",
+        )
+        self.operator_buttons["emergency_stop"].grid(row=1, column=1, sticky="ew")
+
+        info_card = ttk.Frame(rail, style="RailSoft.TFrame", padding=12)
+        info_card.grid(row=5, column=0, sticky="ew")
+        info_card.columnconfigure(0, weight=1)
+        for row, (caption, variable) in enumerate(
+            (
+                ("串口", self.port),
+                ("波特率", self.baudrate),
+                ("记录", self.transcript_path),
+            )
+        ):
+            ttk.Label(info_card, text=caption, style="RailCaption.TLabel").grid(row=row * 2, column=0, sticky="w")
+            ttk.Label(info_card, textvariable=variable, style="RailValue.TLabel", wraplength=220).grid(
+                row=row * 2 + 1,
+                column=0,
+                sticky="ew",
+                pady=(3, 10 if row < 2 else 0),
+            )
+        rail.rowconfigure(6, weight=1)
+        ttk.Button(rail, text="打开记录", command=self.open_transcript, style="Quiet.TButton").grid(
+            row=7,
+            column=0,
+            sticky="ew",
+            pady=(14, 0),
+        )
+
+        self.notebook = ttk.Notebook(main)
+        self.notebook.grid(row=0, column=1, sticky="nsew")
+        self._build_simple_tuning_page()
+        self._build_history_page()
+        self._build_waveform_page()
+
+        self._refresh_operator_controls()
+
+    def _build_simple_tuning_page(self) -> None:
+        page = ttk.Frame(self.notebook, padding=12)
+        self.notebook.add(page, text="调参")
+        page.columnconfigure(0, weight=3)
+        page.columnconfigure(1, weight=2)
+        page.rowconfigure(1, weight=1)
+        page.rowconfigure(2, weight=1)
+
+        metrics = ttk.Frame(page)
+        metrics.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 12))
+        for column in range(6):
+            metrics.columnconfigure(column, weight=1)
+        self._small_metric_card(metrics, "状态", self.status, 0, 0)
+        self._small_metric_card(metrics, "轮次", self.current_round, 0, 1)
+        self._small_metric_card(metrics, "评分", self.score, 0, 2)
+        self._small_metric_card(metrics, "决策", self.decision, 0, 3)
+        self._small_metric_card(metrics, "接受", self.accepted_count, 0, 4)
+        self._small_metric_card(metrics, "回滚", self.rollback_count, 0, 5)
+
+        tuning_card = ttk.Frame(page, style="Card.TFrame", padding=12)
+        tuning_card.grid(row=1, column=0, sticky="nsew", padx=(0, 12), pady=(0, 12))
+        tuning_card.rowconfigure(1, weight=1)
+        tuning_card.columnconfigure(0, weight=1)
+        ttk.Label(tuning_card, text="调参过程", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+        self.tuning_tree = ttk.Treeview(tuning_card, columns=("value",), show="tree headings", height=9)
+        self.tuning_tree.heading("#0", text="项目")
+        self.tuning_tree.heading("value", text="值")
+        self.tuning_tree.column("#0", width=170)
+        self.tuning_tree.column("value", width=470)
+        self.tuning_tree.tag_configure("oddrow", background=self.colors["panel_soft"])
+        self.tuning_tree.tag_configure("evenrow", background="#ffffff")
+        self.tuning_tree.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
+
+        log_card = ttk.Frame(page, style="Card.TFrame", padding=12)
+        log_card.grid(row=2, column=0, sticky="nsew", padx=(0, 12))
+        log_card.rowconfigure(1, weight=1)
+        log_card.columnconfigure(0, weight=1)
+        ttk.Label(log_card, text="上下行", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+        self.log = tk.Text(
+            log_card,
+            wrap="none",
+            height=10,
+            bg=self.colors["log_bg"],
+            fg=self.colors["log_fg"],
+            insertbackground="#ffffff",
+            font=(self.mono_font, 10),
+            relief="flat",
+            bd=0,
+            padx=10,
+            pady=8,
+            spacing1=1,
+            spacing3=1,
+            selectbackground="#334155",
+            selectforeground="#ffffff",
+            highlightthickness=1,
+            highlightbackground="#243044",
+            highlightcolor="#3b82f6",
+        )
+        self.log.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
+        log_scroll = ttk.Scrollbar(log_card, orient="vertical", command=self.log.yview)
+        log_scroll.grid(row=1, column=1, sticky="ns", pady=(10, 0))
+        self.log.configure(yscrollcommand=log_scroll.set)
+        self._configure_log_tags()
+
+        param_card = ttk.Frame(page, style="Card.TFrame", padding=12)
+        param_card.grid(row=1, column=1, sticky="nsew", pady=(0, 12))
+        param_card.rowconfigure(1, weight=1)
+        param_card.columnconfigure(0, weight=1)
+        ttk.Label(param_card, text="参数", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+        self.param_tree = ttk.Treeview(param_card, columns=("key", "current", "range", "role"), show="headings", height=8)
+        self.param_tree.heading("key", text="参数")
+        self.param_tree.heading("current", text="当前")
+        self.param_tree.heading("range", text="范围")
+        self.param_tree.heading("role", text="角色")
+        self.param_tree.column("key", width=90, anchor="center")
+        self.param_tree.column("current", width=80, anchor="center")
+        self.param_tree.column("range", width=105, anchor="center")
+        self.param_tree.column("role", width=80, anchor="center")
+        self.param_tree.tag_configure("oddrow", background=self.colors["panel_soft"])
+        self.param_tree.tag_configure("evenrow", background="#ffffff")
+        self.param_tree.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
+
+        data_card = ttk.Frame(page, style="Card.TFrame", padding=12)
+        data_card.grid(row=2, column=1, sticky="nsew")
+        data_card.rowconfigure(1, weight=1)
+        data_card.columnconfigure(0, weight=1)
+        ttk.Label(data_card, text="最新 DAT", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+        self.dat_tree = ttk.Treeview(data_card, columns=("value",), show="tree headings", height=6)
+        self.dat_tree.heading("#0", text="字段")
+        self.dat_tree.heading("value", text="值")
+        self.dat_tree.column("#0", width=160)
+        self.dat_tree.column("value", width=180)
+        self.dat_tree.tag_configure("oddrow", background=self.colors["panel_soft"])
+        self.dat_tree.tag_configure("evenrow", background="#ffffff")
+        self.dat_tree.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
+
+    def _build_waveform_page(self) -> None:
+        page = ttk.Frame(self.notebook, padding=12)
+        self.notebook.add(page, text="波形")
+        page.columnconfigure(0, weight=1)
+        page.rowconfigure(0, weight=1)
+
+        chart_card = ttk.Frame(page, style="Card.TFrame", padding=12)
+        chart_card.grid(row=0, column=0, sticky="nsew")
+        chart_card.rowconfigure(1, weight=1)
+        chart_card.columnconfigure(0, weight=1)
+        ttk.Label(chart_card, text="波形图", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+        self.waveform_canvas = tk.Canvas(
+            chart_card,
+            bg=self.colors["log_bg"],
+            highlightthickness=1,
+            highlightbackground="#293733",
+        )
+        self.waveform_canvas.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
+        self.waveform_canvas.bind("<Configure>", lambda _event: self._draw_waveform())
+        self._draw_waveform()
+
+    def _build_advanced_ui(self) -> None:
         header = tk.Frame(self, bg=self.colors["header"], height=86)
         header.pack(fill="x")
         header.pack_propagate(False)
@@ -2725,6 +3019,96 @@ class TuningPanel(tk.Tk):
         for index, (key, value) in enumerate(sample.items()):
             tag = "evenrow" if index % 2 == 0 else "oddrow"
             self.dat_tree.insert("", "end", text=str(key), values=(str(value),), tags=(tag,))
+        self._record_waveform_sample(sample)
+
+    def _record_waveform_sample(self, sample: dict[str, Any]) -> None:
+        if not hasattr(self, "waveform_canvas"):
+            return
+        numeric_sample: dict[str, float] = {}
+        for key, value in sample.items():
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                continue
+            if str(key).lower() in {"timestamp", "time", "t"}:
+                continue
+            numeric_sample[str(key)] = number
+        if numeric_sample:
+            self.waveform_samples.append(numeric_sample)
+            self.waveform_samples = self.waveform_samples[-160:]
+        self._draw_waveform()
+
+    def _draw_waveform(self) -> None:
+        if not hasattr(self, "waveform_canvas"):
+            return
+        canvas: tk.Canvas = self.waveform_canvas
+        canvas.delete("all")
+        width = max(int(canvas.winfo_width()), 640)
+        height = max(int(canvas.winfo_height()), 260)
+        margin_left = 46
+        margin_right = 18
+        margin_top = 26
+        margin_bottom = 34
+        plot_left = margin_left
+        plot_right = width - margin_right
+        plot_top = margin_top
+        plot_bottom = height - margin_bottom
+
+        for i in range(5):
+            y = plot_top + (plot_bottom - plot_top) * i / 4
+            canvas.create_line(plot_left, y, plot_right, y, fill="#2a3733")
+        for i in range(6):
+            x = plot_left + (plot_right - plot_left) * i / 5
+            canvas.create_line(x, plot_top, x, plot_bottom, fill="#1d2825")
+        canvas.create_line(plot_left, plot_bottom, plot_right, plot_bottom, fill="#70837d")
+        canvas.create_line(plot_left, plot_top, plot_left, plot_bottom, fill="#70837d")
+
+        if len(self.waveform_samples) < 2:
+            canvas.create_text(
+                width / 2,
+                height / 2,
+                text="等待 DAT",
+                fill="#8fa19b",
+                font=(self.ui_font, 12, "bold"),
+            )
+            return
+
+        ordered_keys: list[str] = []
+        for sample in self.waveform_samples:
+            for key in sample:
+                if key not in ordered_keys:
+                    ordered_keys.append(key)
+        keys = ordered_keys[:4]
+        colors = [self.colors["accent"], self.colors["success"], self.colors["warning"], self.colors["danger"]]
+
+        for key_index, key in enumerate(keys):
+            values = [sample[key] for sample in self.waveform_samples if key in sample]
+            if len(values) < 2:
+                continue
+            low = min(values)
+            high = max(values)
+            span = high - low if high != low else 1.0
+            points: list[float] = []
+            for index, sample in enumerate(self.waveform_samples):
+                if key not in sample:
+                    continue
+                x = plot_left + (plot_right - plot_left) * index / max(len(self.waveform_samples) - 1, 1)
+                normalized = (sample[key] - low) / span
+                y = plot_bottom - normalized * (plot_bottom - plot_top)
+                points.extend([x, y])
+            color = colors[key_index % len(colors)]
+            if len(points) >= 4:
+                canvas.create_line(*points, fill=color, width=2, smooth=True)
+            legend_x = plot_left + key_index * 130
+            canvas.create_line(legend_x, 14, legend_x + 18, 14, fill=color, width=3)
+            canvas.create_text(
+                legend_x + 24,
+                14,
+                text=str(key),
+                anchor="w",
+                fill=self.colors["log_fg"],
+                font=(self.ui_font, 9),
+            )
 
     def _session_log_dir(self) -> Path:
         base = (
@@ -2950,9 +3334,18 @@ class TuningPanel(tk.Tk):
 
 
 def main(argv: list[str] | None = None) -> int:
+    default_ui = os.environ.get("MCU_TUNING_PANEL_UI", "simple")
+    if default_ui not in {"simple", "advanced"}:
+        default_ui = "simple"
     parser = argparse.ArgumentParser(description="打开 MCU 蓝牙调参桌面面板。")
     parser.add_argument("--plan", type=Path, default=None, help="Optional mcu_tuning_plan.yaml to preload")
     parser.add_argument("--mode", choices=["demo", "monitor", "run"], default="demo")
+    parser.add_argument(
+        "--ui",
+        choices=["simple", "advanced"],
+        default=default_ui,
+        help="Desktop UI mode: clean default console or the full multi-page console",
+    )
     parser.add_argument(
         "--run-backend",
         choices=["session", "subprocess"],
@@ -2969,14 +3362,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.hidden_init_test:
-        app = TuningPanel(run_backend=args.run_backend)
+        app = TuningPanel(run_backend=args.run_backend, ui_mode=args.ui)
         app.withdraw()
         app.update_idletasks()
         app.destroy()
         print("RESULT: tuning_panel hidden init ok")
         return 0
 
-    app = TuningPanel(auto_demo=args.auto_start and args.mode == "demo", run_backend=args.run_backend)
+    app = TuningPanel(auto_demo=args.auto_start and args.mode == "demo", run_backend=args.run_backend, ui_mode=args.ui)
     app.mode.set(args.mode)
     if args.plan is not None:
         app.plan_path.set(str(args.plan.resolve()))
