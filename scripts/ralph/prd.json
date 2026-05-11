@@ -128,7 +128,7 @@
         "Tests pass for both rollback targets, missing baseline rejection, and rollback command timeout."
       ],
       "priority": 8,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

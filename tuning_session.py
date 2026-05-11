@@ -533,6 +533,7 @@ class TuningSession:
         self.state = self.STATE_IDLE
         self.current_parameter_key: str | None = None
         self.current_round_index: int | None = None
+        self._active_serial: serial.Serial | None = None
         self.baseline_parameters: dict[str, float] | None = None
         self.skipped_parameter_keys: set[str] = set()
         self.skipped_parameters: list[dict[str, Any]] = []
@@ -837,6 +838,16 @@ class TuningSession:
         )
         return result
 
+    def _rollback_keys_for(self, target_values: dict[str, float]) -> list[str]:
+        ordered_keys: list[str] = []
+        for key in self.plan["step_policy"].get("parameter_order", []):
+            if key in target_values and key not in ordered_keys:
+                ordered_keys.append(key)
+        for key in self.parameters:
+            if key in target_values and key not in ordered_keys:
+                ordered_keys.append(key)
+        return ordered_keys
+
     def rollback_to(self, target: str) -> ActionResult:
         if target not in {"last_stable", "baseline"}:
             return self._reject_action(
@@ -852,11 +863,98 @@ class TuningSession:
                 "Cannot roll back before a baseline exists.",
                 target=target,
             )
-        return self._reject_action(
-            "rollback_to",
-            "rollback_not_available",
-            "Rollback control is not available until rollback targets are implemented.",
-            target=target,
+        if self.state in {self.STATE_STOPPING, self.STATE_STOPPED, self.STATE_ERROR}:
+            return self._reject_action(
+                "rollback_to",
+                "session_not_rollbackable",
+                f"Cannot roll back while session state is {self.state}.",
+                target=target,
+            )
+        if self._active_serial is None:
+            return self._reject_action(
+                "rollback_to",
+                "connection_unavailable",
+                "Cannot roll back because no active session connection is available.",
+                target=target,
+            )
+
+        target_values = dict(self.last_stable if target == "last_stable" else self.baseline_parameters)
+        rollback_template = self.plan["rollback"]["command_template"]
+        previous_state = self.state
+        command_results: list[dict[str, Any]] = []
+        self._set_state(self.STATE_ROLLBACK, f"{target}_rollback_started")
+
+        for key in self._rollback_keys_for(target_values):
+            value = target_values[key]
+            command = format_template(rollback_template, key, value)
+            result = self.execute_rollback(self._active_serial, key, value)
+            command_record: dict[str, Any] = {
+                "key": key,
+                "value": value,
+                "command": command,
+                "ok": result.ok,
+                "lines": list(result.lines),
+            }
+            if result.error:
+                command_record["error"] = result.error
+            command_results.append(command_record)
+            if not result.ok:
+                self.stop_reason = "rollback_failed"
+                self.stop_requested = True
+                self.pause_requested = False
+                self._paused_return_state = None
+                self._set_state(self.STATE_ERROR, "operator_rollback_failed")
+                message = f"Rollback to {target} failed for {key}: {result.error}"
+                data = {
+                    "target": target,
+                    "previous_state": previous_state,
+                    "failed_key": key,
+                    "commands": command_results,
+                }
+                self.emit(
+                    "action",
+                    message,
+                    action="rollback_to",
+                    ok=False,
+                    state=self.state,
+                    session_id=self.session_id,
+                    error_code="rollback_failed",
+                    **data,
+                )
+                return ActionResult(
+                    ok=False,
+                    action="rollback_to",
+                    state=self.state,
+                    message=message,
+                    error_code="rollback_failed",
+                    data=data,
+                )
+
+        restored_parameters = {key: float(target_values[key]) for key in self._rollback_keys_for(target_values)}
+        self.current.update(restored_parameters)
+        self._set_state(previous_state, f"{target}_rollback_finished")
+        message = f"Rollback to {target} completed."
+        data = {
+            "target": target,
+            "previous_state": previous_state,
+            "restored_parameters": restored_parameters,
+            "commands": command_results,
+        }
+        self.emit(
+            "action",
+            message,
+            action="rollback_to",
+            ok=True,
+            state=self.state,
+            session_id=self.session_id,
+            **data,
+        )
+        return ActionResult(
+            ok=True,
+            action="rollback_to",
+            state=self.state,
+            message=message,
+            data=data,
         )
 
     def _wait_if_paused(self) -> None:
@@ -1015,6 +1113,7 @@ class TuningSession:
         self.emit("info", f"Opening serial port {transport['port']} @ {transport['baudrate']}...")
 
         with serial.Serial(**serial_kwargs(transport)) as ser:
+            self._active_serial = ser
             self._set_state(self.STATE_CONNECTED, "serial_opened")
             if not self.stop_requested:
                 status = send_command(
@@ -1249,6 +1348,7 @@ class TuningSession:
                 if self.state != self.STATE_ERROR:
                     self._set_state(self.STATE_STOPPING, "cleanup_started")
                 self.stop_device(ser)
+                self._active_serial = None
 
         summary = self.summary()
         log_record(log_path, {"summary": summary})

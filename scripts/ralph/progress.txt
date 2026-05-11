@@ -12,6 +12,7 @@ Started: 2026-05-11 12:00:00
 - Pause/resume no-hardware tests can call `resume()` from the structured `paused` state event handler to avoid background thread timing sleeps while still exercising safe checkpoints.
 - Safe-stop command outcomes are stored on `TuningSession.stop_command_results` and included in `summary()["stop_command_results"]` with statuses such as `succeeded`, `timed_out`, and `unavailable`.
 - Stop-reason updates inside `TuningSession` should use `_apply_stop_reason(...)` so emergency `operator_abort` is not overwritten by generic manual-stop checkpoints.
+- Manual rollback controls require `baseline_parameters` and an active session serial handle; keep the missing-baseline guard before active-connection checks so invalid controls stay no-hardware.
 
 ## 2026-05-11 12:14:10 - US-001
 - Implemented stable `TuningSessionState` values and readable `TuningSession.state`, initialized to `idle` without opening serial.
@@ -99,4 +100,16 @@ Started: 2026-05-11 12:00:00
   - Skip control can be tested by calling `skip_current_param(...)` from the structured `round` event before the YAML `SET` command is sent.
   - Skipped parameter data is session-scoped in `skipped_parameter_keys` and `skipped_parameters`; it is emitted through summary JSONL records for later report/export work.
   - A deepcopy comparison of the input plan is a lightweight guard that session controls do not mutate source YAML-derived structures.
+---
+
+## 2026-05-11 13:01:26 - US-008
+- Implemented `rollback_to("last_stable")` and `rollback_to("baseline")` through YAML `rollback.command_template` while an active session connection exists.
+- Added one structured `rollback_to` action event per manual rollback, per-command result metadata, current-parameter restoration, and `rollback_failed` error handling on command timeout.
+- Files changed: `tuning_session.py`, `test_tuning_session_rollback_targets.py`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`, `project_status.md`, `.project_checkpoints/US-008/20260511-125846/`.
+- Verification commands and results: `python -m py_compile tuning_session.py test_tuning_session_rollback_targets.py test_tuning_session_invalid_controls.py` passed; `python -m unittest test_tuning_session_rollback_targets.py` passed with 4 tests; full session compile set passed; full session unittest set passed with 21 tests.
+- Checkpoint path: `.project_checkpoints/US-008/20260511-125846/`
+- Real serial status: not opened
+- Learnings for future iterations:
+  - Manual rollback tests can invoke `rollback_to(...)` from structured `decision` or `baseline` events while fake serial is active.
+  - Timeout rollback should set `stop_reason` to `rollback_failed`, request controlled shutdown, and leave the terminal state as `error`.
 ---
