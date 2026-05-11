@@ -32,7 +32,7 @@
         "Tests pass for transition ordering and required event fields."
       ],
       "priority": 2,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

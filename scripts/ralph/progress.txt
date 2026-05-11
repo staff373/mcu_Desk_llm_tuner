@@ -20,3 +20,15 @@ Started: 2026-05-11 12:00:00
   - No-hardware session tests can patch `tuning_session.serial.Serial` with a fake serial class and assert the fake opened only a virtual port.
   - The current project has no existing test package; root-level `unittest` files are the lowest-friction verification path for early session-core stories.
 ---
+
+## 2026-05-11 12:19:24 - US-002
+- Implemented structured `state` events for every `TuningSession` state transition, including `previous_state`, `next_state`, `reason`, `session_id`, and `timestamp`.
+- Added JSONL recording for state transitions when session logging is enabled, starting before the first `idle` -> `validating` transition.
+- Files changed: `tuning_session.py`, `test_tuning_session_state_events.py`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`, `project_status.md`, `.project_checkpoints/US-002/20260511-121738/`.
+- Verification commands and results: `python -m py_compile tuning_session.py test_tuning_session_state.py test_tuning_session_state_events.py` passed; `python -m unittest test_tuning_session_state.py test_tuning_session_state_events.py` passed with 4 tests.
+- Checkpoint path: `.project_checkpoints/US-002/20260511-121738/`
+- Real serial status: not opened
+- Learnings for future iterations:
+  - `TuningSession.session_id` now backs the JSONL filename and all state transition events for timeline correlation.
+  - State records are JSONL objects with top-level `type`, `timestamp`, `message`, `previous_state`, `next_state`, `reason`, and `session_id` fields.
+---
