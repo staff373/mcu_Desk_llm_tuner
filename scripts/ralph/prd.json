@@ -256,7 +256,7 @@
         "Tests pass for allowed actions, rejected actions, and event forwarding."
       ],
       "priority": 16,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

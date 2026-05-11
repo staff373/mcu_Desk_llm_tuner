@@ -19,6 +19,7 @@ Started: 2026-05-11 12:00:00
 - Real serial access in `TuningSession` now goes through `PySerialTransport.from_config`; constructing the transport is side-effect free, and no-hardware tests can inject `transport_factory` instead of patching GUI or CLI layers.
 - Virtual no-hardware flows should inject `VirtualTransport` through `TuningSession.transport_factory`; it is opt-in and never selected by port name or CLI defaults.
 - Virtual scoring targets can be declared per test-only fixture parameter with `virtual_target`; `VirtualTransport` falls back to `current` when no target is declared.
+- Agent-facing no-hardware controls live in `agent_console_probe.py`; inject `VirtualTransport` through `AgentControlFacade(transport_factory_provider=...)` and patch `tuning_session.serial.Serial` to assert no real serial port opens.
 
 ## 2026-05-11 12:14:10 - US-001
 - Implemented stable `TuningSessionState` values and readable `TuningSession.state`, initialized to `idle` without opening serial.
@@ -206,4 +207,17 @@ Started: 2026-05-11 12:00:00
   - `VirtualTransport` now reads `virtual_target` from fixture parameters and keeps direct `target_parameters=...` injection for tests that need custom targets.
   - The shared virtual fixture currently yields deterministic decision counts: 4 accept, 2 hold, and 2 rollback over 8 rounds.
   - Summary determinism checks should normalize generated artifact paths such as `log_path`, because those paths intentionally include per-run temporary locations.
+---
+
+## 2026-05-11 14:10:53 - US-016
+- Implemented `AgentControlFacade` in `agent_console_probe.py` with `load_plan`, `validate_plan`, `start_auto_tune`, `pause`, `resume`, `skip_current_param`, `rollback_to`, `stop`, and `export_session_report`.
+- Added no-hardware facade tests for pre-validation rejections, allowed stop control, virtual auto-tune event forwarding, and report export action records.
+- Files changed: `agent_console_probe.py`, `test_agent_control_facade.py`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`, `project_status.md`, `.project_checkpoints/US-016/20260511-140716/`.
+- Verification commands and results: `python -m py_compile tuning_session.py agent_console_probe.py test_agent_control_facade.py validate_plan.py` passed; `python -m unittest test_agent_control_facade.py` passed with 3 tests; `python validate_plan.py .\fixtures\virtual_mcu_tuning_plan.yaml` passed with `RESULT: valid`; `python -m unittest discover -p "test_tuning_session*.py"` passed with 38 tests.
+- Checkpoint path: `.project_checkpoints/US-016/20260511-140716/`
+- Real serial status: not opened
+- Learnings for future iterations:
+  - Keep the facade public method set narrow; do not add arbitrary serial send/write helpers.
+  - Facade event forwarding can safely invoke session controls from structured event callbacks when virtual transport is injected.
+  - `export_session_report` currently provides a lightweight JSON report for the facade; US-018 can harden the schema and report content.
 ---
