@@ -321,7 +321,7 @@
         "Tests pass for event-to-page routing and unknown-event handling."
       ],
       "priority": 20,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

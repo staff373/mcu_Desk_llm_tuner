@@ -930,13 +930,128 @@ class TuningPanel(tk.Tk):
 
     def _handle_session_event(self, event: TuningEvent) -> None:
         line = self._session_event_to_line(event)
-        self._handle_line(line)
+        self._append_log_line(line, self._session_event_log_tag(event))
+        self._update_from_session_event(event, line)
+        self._refresh_tuning_tree()
+
+    def _append_log_line(self, line: str, tag: str | None = None) -> None:
+        tagged_line = f"{datetime.now().strftime('%H:%M:%S')} {line}"
+        log_tag = tag or self._line_tag(line)
+        self.log.insert("end", tagged_line + "\n", log_tag)
+        self.log.see("end")
+        self.latest_event.set(line[:90])
+        if self.transcript_handle is not None:
+            self.transcript_handle.write(tagged_line + "\n")
+            self.transcript_handle.flush()
+
+    def _session_event_log_tag(self, event: TuningEvent) -> str:
+        if event.type == "tx":
+            return "TX"
+        if event.type == "rx":
+            return "RX"
+        if event.type == "dat":
+            return "DAT"
+        if event.type in {"round", "decision", "baseline"}:
+            return "ROUND"
+        if event.type in {"error", "action_rejected"}:
+            return "ERR"
+        return "INFO"
+
+    def _update_from_session_event(self, event: TuningEvent, line: str) -> None:
         if event.type == "state":
             next_state = event.data.get("next_state")
             if next_state:
                 self.status.set(str(next_state))
-        elif event.type == "error":
+            return
+        if event.type == "dat":
+            sample = event.data.get("sample")
+            if isinstance(sample, dict):
+                self._update_dat_tree(sample)
+            return
+        if event.type == "baseline":
+            score = event.data.get("score")
+            if score is not None:
+                self.score.set(str(score))
+                self._add_history_event("基线", f"score={score}")
+            return
+        if event.type == "round":
+            round_index = event.data.get("round")
+            if round_index is not None:
+                self.current_round.set(str(round_index))
+            self.decision.set("试验")
+            return
+        if event.type == "decision":
+            self._apply_decision_event(event, line)
+            return
+        if event.type == "record":
+            record = event.data.get("record", {})
+            detail = json.dumps(record, ensure_ascii=False) if isinstance(record, dict) else line
+            self._add_history_event("记录", detail)
+            return
+        if event.type == "warning":
+            self._add_history_event("警告", line)
+            return
+        if event.type == "error":
             self.status.set("error")
+            self._increment_counter(self.failed_count)
+            self._add_history_event("错误", line)
+            return
+        if event.type == "summary":
+            summary = event.data.get("summary", {})
+            if isinstance(summary, dict):
+                self._apply_summary_event(summary)
+            self._add_history_event("总结", line)
+            return
+        if event.type == "action_rejected":
+            self._add_history_event("错误", line)
+            return
+        if event.type == "action":
+            self._add_history_event("动作", line)
+            return
+        if event.type not in {"tx", "rx", "info"}:
+            self._add_history_event("事件", f"{event.type}: {line}")
+
+    def _apply_decision_event(self, event: TuningEvent, line: str) -> None:
+        decision = str(event.data.get("decision", "")).lower()
+        score = event.data.get("score")
+        if score is not None:
+            self.score.set(str(score))
+        if decision == "accept":
+            self.decision.set("接受")
+            self._increment_counter(self.accepted_count)
+            self._add_history_event("接受", line)
+        elif decision == "hold":
+            self.decision.set("保持")
+            self._increment_counter(self.held_count)
+            self._add_history_event("保持", line)
+        elif decision == "rollback":
+            self.decision.set("回滚")
+            self._increment_counter(self.rollback_count)
+            self._add_history_event("回滚", line)
+        elif decision:
+            self.decision.set(decision)
+            self._add_history_event("决策", line)
+        else:
+            self._add_history_event("决策", line)
+
+    def _apply_summary_event(self, summary: dict[str, Any]) -> None:
+        final_score = summary.get("final_score")
+        if final_score is not None:
+            self.score.set(str(final_score))
+        if "accepted" in summary:
+            self.accepted_count.set(str(summary.get("accepted")))
+        if "held" in summary:
+            self.held_count.set(str(summary.get("held")))
+        if "rolled_back" in summary:
+            self.rollback_count.set(str(summary.get("rolled_back")))
+        if "failed" in summary:
+            self.failed_count.set(str(summary.get("failed")))
+        stop_reason = summary.get("stop_reason")
+        if stop_reason is not None:
+            self.stop_reason.set(str(stop_reason))
+        final_parameters = summary.get("final_parameters")
+        if isinstance(final_parameters, dict):
+            self._update_parameter_values(final_parameters)
 
     def _session_event_to_line(self, event: TuningEvent) -> str:
         if event.type in {"tx", "rx"}:
@@ -945,8 +1060,24 @@ class TuningPanel(tk.Tk):
             sample = event.data.get("sample")
             payload = json.dumps(sample, ensure_ascii=False) if isinstance(sample, dict) else event.message
             return f"DAT {payload}"
+        if event.type == "baseline":
+            score = event.data.get("score")
+            return event.message or f"Baseline score: {score}"
+        if event.type == "round":
+            round_index = event.data.get("round", "-")
+            key = event.data.get("key", "-")
+            trial_value = event.data.get("trial_value")
+            if trial_value is None:
+                return event.message or f"Round {round_index}: {key}"
+            return event.message or f"Round {round_index}: {key} -> {trial_value}"
+        if event.type == "decision":
+            decision = event.data.get("decision", "decision")
+            score = event.data.get("score")
+            if score is None:
+                return event.message or str(decision)
+            return event.message or f"{decision}: score={score}"
         if event.type == "summary":
-            return f"Summary: {json.dumps(event.data.get('summary', {}), ensure_ascii=False)}"
+            return f"Summary: {json.dumps(event.data.get('summary', {}), ensure_ascii=False, default=str)}"
         if event.type == "state":
             previous_state = event.data.get("previous_state", "-")
             next_state = event.data.get("next_state", "-")
@@ -960,13 +1091,17 @@ class TuningPanel(tk.Tk):
             return event.message or f"ERROR [{code}] action rejected"
         if event.type == "record":
             record = event.data.get("record", {})
-            return f"RECORD {json.dumps(record, ensure_ascii=False)}"
+            return f"RECORD {json.dumps(record, ensure_ascii=False, default=str)}"
         if event.type == "warning":
             return f"WARN {event.message}"
         if event.type == "error":
             code = event.data.get("error_code") or event.data.get("code") or "unknown"
             return f"ERROR [{code}] {event.message}"
-        return event.message or event.type
+        if event.message:
+            return event.message
+        if event.data:
+            return f"{event.type}: {json.dumps(event.data, ensure_ascii=False, default=str)}"
+        return event.type
 
     def _handle_session_error(self, exc: BaseException) -> None:
         self.status.set("error")
@@ -981,14 +1116,7 @@ class TuningPanel(tk.Tk):
         self._refresh_tuning_tree()
 
     def _handle_line(self, line: str) -> None:
-        tagged_line = f"{datetime.now().strftime('%H:%M:%S')} {line}"
-        tag = self._line_tag(line)
-        self.log.insert("end", tagged_line + "\n", tag)
-        self.log.see("end")
-        self.latest_event.set(line[:90])
-        if self.transcript_handle is not None:
-            self.transcript_handle.write(tagged_line + "\n")
-            self.transcript_handle.flush()
+        self._append_log_line(line)
         self._update_from_line(line)
         self._refresh_tuning_tree()
 
