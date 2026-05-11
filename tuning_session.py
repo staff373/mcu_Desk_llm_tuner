@@ -2244,8 +2244,11 @@ class TuningSession:
 
     def summary(self) -> dict[str, Any]:
         return {
+            "session_id": self.session_id,
+            "plan_path": str(self.plan_path),
             "final_parameters": self.current,
             "last_stable": self.last_stable,
+            "baseline_parameters": self.baseline_parameters,
             "baseline_score": self.baseline_score,
             "final_score": self.final_score,
             "accepted": self.accepted,

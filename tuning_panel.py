@@ -8,10 +8,13 @@ import json
 import os
 import queue
 import re
+import shutil
 import subprocess
 import sys
 import threading
 import time
+from collections import Counter
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -43,6 +46,243 @@ SESSION_ERROR = "__SESSION_ERROR__"
 
 
 TransportFactory = Callable[[dict[str, Any]], Any]
+SESSION_REPLAY_SCHEMA_VERSION = 1
+
+
+@dataclass
+class SessionReplayLoadResult:
+    source_path: Path
+    session_id: str = ""
+    plan_path: str | None = None
+    jsonl_path: str | None = None
+    transcript_path: str | None = None
+    plan_snapshot_path: str | None = None
+    summary_path: str | None = None
+    final_summary: dict[str, Any] = field(default_factory=dict)
+    records: list[dict[str, Any]] = field(default_factory=list)
+    event_counts: dict[str, int] = field(default_factory=dict)
+    parameter_differences: list[dict[str, Any]] = field(default_factory=list)
+    load_errors: list[str] = field(default_factory=list)
+    recoverable: bool = True
+
+
+def _resolve_replay_path(base_path: Path, raw_path: Any) -> str | None:
+    if raw_path in {None, ""}:
+        return None
+    path = Path(str(raw_path))
+    if not path.is_absolute():
+        path = base_path.parent / path
+    return str(path)
+
+
+def _read_replay_json(path: Path, result: SessionReplayLoadResult) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        result.load_errors.append(f"{path}: {exc}")
+        result.recoverable = False
+        return None
+    except json.JSONDecodeError as exc:
+        result.load_errors.append(f"{path}: invalid JSON at line {exc.lineno}: {exc.msg}")
+        return None
+    if not isinstance(payload, dict):
+        result.load_errors.append(f"{path}: top-level JSON must be an object")
+        return None
+    return payload
+
+
+def _read_replay_jsonl(path: Path, result: SessionReplayLoadResult) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        result.load_errors.append(f"{path}: {exc}")
+        result.recoverable = False
+        return records
+    for line_number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError as exc:
+            result.load_errors.append(f"{path}:{line_number}: invalid JSON: {exc.msg}")
+            continue
+        if isinstance(payload, dict):
+            records.append(payload)
+        else:
+            result.load_errors.append(f"{path}:{line_number}: JSONL record must be an object")
+    return records
+
+
+def _summary_from_records(records: list[dict[str, Any]]) -> dict[str, Any]:
+    for record in reversed(records):
+        summary = record.get("summary")
+        if isinstance(summary, dict):
+            return dict(summary)
+    for record in reversed(records):
+        if record.get("type") == "summary" and isinstance(record.get("final_summary"), dict):
+            return dict(record["final_summary"])
+    return {}
+
+
+def _first_session_id(records: list[dict[str, Any]]) -> str:
+    for record in records:
+        session_id = record.get("session_id")
+        if session_id:
+            return str(session_id)
+    return ""
+
+
+def _baseline_parameters_from_records(records: list[dict[str, Any]]) -> dict[str, Any]:
+    for record in records:
+        before_params = record.get("before_params")
+        if isinstance(before_params, dict):
+            return dict(before_params)
+    return {}
+
+
+def _numeric_delta(before: Any, after: Any) -> Any:
+    try:
+        return float(after) - float(before)
+    except (TypeError, ValueError):
+        return "-"
+
+
+def _build_parameter_differences(
+    summary: dict[str, Any],
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    final_parameters = summary.get("final_parameters")
+    if not isinstance(final_parameters, dict):
+        return []
+    baseline_parameters = summary.get("baseline_parameters")
+    if not isinstance(baseline_parameters, dict):
+        baseline_parameters = _baseline_parameters_from_records(records)
+    if not isinstance(baseline_parameters, dict) or not baseline_parameters:
+        return []
+
+    rows: list[dict[str, Any]] = []
+    keys = sorted({str(key) for key in baseline_parameters} | {str(key) for key in final_parameters})
+    for key in keys:
+        before = baseline_parameters.get(key)
+        after = final_parameters.get(key)
+        rows.append(
+            {
+                "key": key,
+                "baseline": before,
+                "final": after,
+                "delta": _numeric_delta(before, after),
+            }
+        )
+    return rows
+
+
+def _apply_replay_records(
+    result: SessionReplayLoadResult,
+    records: list[dict[str, Any]],
+    *,
+    jsonl_path: str | None = None,
+) -> None:
+    result.records = records
+    if jsonl_path is not None:
+        result.jsonl_path = jsonl_path
+    if not result.final_summary:
+        result.final_summary = _summary_from_records(records)
+    if not result.session_id:
+        result.session_id = (
+            str(result.final_summary.get("session_id") or "")
+            or _first_session_id(records)
+            or (Path(jsonl_path).stem if jsonl_path else "")
+        )
+    if not result.event_counts:
+        result.event_counts = dict(Counter(str(record.get("type")) for record in records if record.get("type")))
+
+
+def _load_replay_summary_file(path: Path, result: SessionReplayLoadResult) -> None:
+    payload = _read_replay_json(path, result)
+    if payload is None:
+        return
+    summary = payload.get("summary") or payload.get("final_summary")
+    if isinstance(summary, dict):
+        result.final_summary = dict(summary)
+    elif any(key in payload for key in ("final_parameters", "baseline_score", "final_score")):
+        result.final_summary = dict(payload)
+    else:
+        result.load_errors.append(f"{path}: missing final summary")
+    result.summary_path = str(path)
+    if not result.session_id:
+        result.session_id = str(payload.get("session_id") or result.final_summary.get("session_id") or path.stem)
+
+
+def _load_replay_manifest(payload: dict[str, Any], source_path: Path, result: SessionReplayLoadResult) -> None:
+    artifact_paths = payload.get("artifact_paths", {})
+    if not isinstance(artifact_paths, dict):
+        artifact_paths = {}
+    result.session_id = str(payload.get("session_id") or "")
+    result.plan_path = _resolve_replay_path(source_path, payload.get("plan_path"))
+    result.jsonl_path = _resolve_replay_path(
+        source_path,
+        artifact_paths.get("session_log") or artifact_paths.get("jsonl") or artifact_paths.get("jsonl_path"),
+    )
+    result.transcript_path = _resolve_replay_path(source_path, artifact_paths.get("transcript"))
+    result.plan_snapshot_path = _resolve_replay_path(source_path, artifact_paths.get("plan_snapshot"))
+    result.summary_path = _resolve_replay_path(source_path, artifact_paths.get("final_summary") or artifact_paths.get("summary"))
+
+    summary = payload.get("summary") or payload.get("final_summary")
+    if isinstance(summary, dict):
+        result.final_summary = dict(summary)
+    if result.summary_path and Path(result.summary_path).exists() and not result.final_summary:
+        _load_replay_summary_file(Path(result.summary_path), result)
+    if result.jsonl_path:
+        _apply_replay_records(result, _read_replay_jsonl(Path(result.jsonl_path), result), jsonl_path=result.jsonl_path)
+
+
+def _load_replay_report(payload: dict[str, Any], source_path: Path, result: SessionReplayLoadResult) -> None:
+    artifact_paths = payload.get("artifact_paths", {})
+    if not isinstance(artifact_paths, dict):
+        artifact_paths = {}
+    result.session_id = str(payload.get("session_id") or "")
+    result.plan_path = _resolve_replay_path(source_path, payload.get("plan_path"))
+    result.jsonl_path = _resolve_replay_path(source_path, artifact_paths.get("session_log"))
+    result.transcript_path = _resolve_replay_path(source_path, artifact_paths.get("transcript"))
+    result.plan_snapshot_path = _resolve_replay_path(source_path, artifact_paths.get("plan_snapshot"))
+    result.summary_path = _resolve_replay_path(source_path, artifact_paths.get("final_summary") or artifact_paths.get("summary"))
+    result.final_summary = dict(payload.get("final_summary") or {})
+    event_counts = payload.get("event_counts")
+    if isinstance(event_counts, dict):
+        result.event_counts = {str(key): int(value) for key, value in event_counts.items()}
+    if result.jsonl_path:
+        _apply_replay_records(result, _read_replay_jsonl(Path(result.jsonl_path), result), jsonl_path=result.jsonl_path)
+
+
+def load_session_replay(source_path: Path | str) -> SessionReplayLoadResult:
+    path = Path(source_path)
+    result = SessionReplayLoadResult(source_path=path)
+    if not path.exists():
+        result.load_errors.append(f"{path}: file does not exist")
+        result.recoverable = False
+        return result
+
+    if path.suffix.lower() == ".jsonl":
+        _apply_replay_records(result, _read_replay_jsonl(path, result), jsonl_path=str(path))
+    else:
+        payload = _read_replay_json(path, result)
+        if payload is not None:
+            if payload.get("report_type") == "agent_session_report":
+                _load_replay_report(payload, path, result)
+            elif payload.get("artifact_type") == "tuning_session_manifest" or "artifact_paths" in payload:
+                _load_replay_manifest(payload, path, result)
+            else:
+                _load_replay_summary_file(path, result)
+
+    if not result.final_summary:
+        result.load_errors.append("missing final session summary")
+    if not result.session_id:
+        result.session_id = str(result.final_summary.get("session_id") or path.stem)
+    result.parameter_differences = _build_parameter_differences(result.final_summary, result.records)
+    if result.final_summary and not result.parameter_differences:
+        result.load_errors.append("missing baseline or final parameters for replay comparison")
+    return result
 
 
 def select_execution_backend(mode: str, run_backend: str) -> str:
@@ -181,6 +421,8 @@ class TuningPanel(tk.Tk):
         self.parameter_keys_text = tk.StringVar(value="")
         self.safety_status = tk.StringVar(value="未加载安全规则")
         self.command_preview_status = tk.StringVar(value="未加载命令预览")
+        self.replay_path = tk.StringVar(value="")
+        self.replay_status = tk.StringVar(value="未加载回放")
 
         self.plan: dict[str, Any] | None = None
         self.validated_plan_path: Path | None = None
@@ -198,6 +440,8 @@ class TuningPanel(tk.Tk):
         self.safety_triggered_rules: set[str] = set()
         self.command_preview: dict[str, str] = {"source": "-", "command": "-", "detail": "未加载 YAML 计划"}
         self.last_sent_command: dict[str, str] = {"source": "-", "command": "-", "detail": "尚未发送"}
+        self.current_session_artifacts: dict[str, str] = {}
+        self.replay_data: SessionReplayLoadResult | None = None
         self.connection_transport: Any | None = None
         self.session_transport_factory = session_transport_factory
         self.run_backend = run_backend or os.environ.get("MCU_TUNING_PANEL_RUN_BACKEND", "session")
@@ -403,6 +647,7 @@ class TuningPanel(tk.Tk):
         self._build_plan_page()
         self._build_monitor_page()
         self._build_tuning_page()
+        self._build_replay_page()
         self._build_history_page()
 
         footer = ttk.Frame(self, padding=(16, 0, 16, 12))
@@ -794,6 +1039,80 @@ class TuningPanel(tk.Tk):
         self.tuning_tree.tag_configure("oddrow", background=self.colors["panel_soft"])
         self.tuning_tree.tag_configure("evenrow", background="#ffffff")
         self.tuning_tree.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
+
+    def _build_replay_page(self) -> None:
+        page = ttk.Frame(self.notebook, padding=14)
+        self.notebook.add(page, text="回放")
+        page.columnconfigure(0, weight=1)
+        page.rowconfigure(1, weight=1)
+        page.rowconfigure(2, weight=1)
+        page.rowconfigure(3, weight=0)
+
+        controls = ttk.Frame(page, style="Card.TFrame", padding=12)
+        controls.grid(row=0, column=0, sticky="ew", pady=(0, 14))
+        controls.columnconfigure(1, weight=1)
+        ttk.Label(controls, text="历史会话", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 10))
+        ttk.Entry(controls, textvariable=self.replay_path).grid(row=0, column=1, sticky="ew", padx=(0, 8))
+        ttk.Button(controls, text="选择记录", command=self.browse_replay_source).grid(row=0, column=2, padx=(0, 8))
+        ttk.Button(controls, text="加载回放", command=self.load_replay_source).grid(row=0, column=3)
+        ttk.Label(controls, textvariable=self.replay_status, style="Muted.TLabel").grid(
+            row=1,
+            column=0,
+            columnspan=4,
+            sticky="w",
+            pady=(8, 0),
+        )
+
+        summary_card = ttk.Frame(page, style="Card.TFrame", padding=12)
+        summary_card.grid(row=1, column=0, sticky="nsew", pady=(0, 14))
+        summary_card.rowconfigure(1, weight=1)
+        summary_card.columnconfigure(0, weight=1)
+        ttk.Label(summary_card, text="回放摘要", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+        self.replay_summary_tree = ttk.Treeview(summary_card, columns=("value",), show="tree headings", height=8)
+        self.replay_summary_tree.heading("#0", text="项目")
+        self.replay_summary_tree.heading("value", text="值")
+        self.replay_summary_tree.column("#0", width=220)
+        self.replay_summary_tree.column("value", width=760)
+        self.replay_summary_tree.tag_configure("oddrow", background=self.colors["panel_soft"])
+        self.replay_summary_tree.tag_configure("evenrow", background="#ffffff")
+        self.replay_summary_tree.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
+
+        diff_card = ttk.Frame(page, style="Card.TFrame", padding=12)
+        diff_card.grid(row=2, column=0, sticky="nsew", pady=(0, 14))
+        diff_card.rowconfigure(1, weight=1)
+        diff_card.columnconfigure(0, weight=1)
+        ttk.Label(diff_card, text="参数差异", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+        self.replay_diff_tree = ttk.Treeview(
+            diff_card,
+            columns=("baseline", "final", "delta"),
+            show="tree headings",
+            height=8,
+        )
+        self.replay_diff_tree.heading("#0", text="参数")
+        self.replay_diff_tree.heading("baseline", text="基线")
+        self.replay_diff_tree.heading("final", text="最终")
+        self.replay_diff_tree.heading("delta", text="变化")
+        self.replay_diff_tree.column("#0", width=180)
+        self.replay_diff_tree.column("baseline", width=200, anchor="center")
+        self.replay_diff_tree.column("final", width=200, anchor="center")
+        self.replay_diff_tree.column("delta", width=200, anchor="center")
+        self.replay_diff_tree.tag_configure("oddrow", background=self.colors["panel_soft"])
+        self.replay_diff_tree.tag_configure("evenrow", background="#ffffff")
+        self.replay_diff_tree.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
+
+        error_card = ttk.Frame(page, style="Card.TFrame", padding=12)
+        error_card.grid(row=3, column=0, sticky="ew")
+        error_card.columnconfigure(0, weight=1)
+        ttk.Label(error_card, text="加载问题", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+        self.replay_error_tree = ttk.Treeview(error_card, columns=("detail",), show="tree headings", height=4)
+        self.replay_error_tree.heading("#0", text="状态")
+        self.replay_error_tree.heading("detail", text="内容")
+        self.replay_error_tree.column("#0", width=160)
+        self.replay_error_tree.column("detail", width=800)
+        self.replay_error_tree.tag_configure("recoverable", background="#fef3c7", foreground="#92400e")
+        self.replay_error_tree.tag_configure("ok", background=self.colors["panel_soft"])
+        self.replay_error_tree.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        self._refresh_replay_view(None)
 
     def _build_history_page(self) -> None:
         page = ttk.Frame(self.notebook, padding=14)
@@ -1802,6 +2121,90 @@ class TuningPanel(tk.Tk):
         self._refresh_operator_controls()
         self._refresh_connection_controls()
 
+    def browse_replay_source(self) -> None:
+        path = filedialog.askopenfilename(
+            filetypes=[
+                ("会话记录", "*.json *.jsonl"),
+                ("所有文件", "*.*"),
+            ]
+        )
+        if path:
+            self.load_replay_file(Path(path))
+
+    def load_replay_source(self) -> bool:
+        raw_path = self.replay_path.get().strip()
+        if not raw_path:
+            self.replay_status.set("未选择历史会话")
+            self._refresh_replay_view(None)
+            return False
+        return self.load_replay_file(Path(raw_path))
+
+    def load_replay_file(self, path: Path | str) -> bool:
+        replay = load_session_replay(path)
+        self.replay_path.set(str(path))
+        self.replay_data = replay
+        self._refresh_replay_view(replay)
+        if replay.load_errors:
+            first_error = replay.load_errors[0]
+            prefix = "可恢复加载问题" if replay.recoverable else "加载失败"
+            self._add_history_event("回放", f"{prefix}: {first_error}")
+        else:
+            self._add_history_event("回放", f"已加载：{replay.session_id}")
+        return bool(replay.final_summary) and replay.recoverable
+
+    def _refresh_replay_view(self, replay: SessionReplayLoadResult | None) -> None:
+        if not hasattr(self, "replay_summary_tree"):
+            return
+        self.replay_summary_tree.delete(*self.replay_summary_tree.get_children())
+        self.replay_diff_tree.delete(*self.replay_diff_tree.get_children())
+        self.replay_error_tree.delete(*self.replay_error_tree.get_children())
+
+        if replay is None:
+            self.replay_status.set("未加载回放")
+            self.replay_error_tree.insert("", "end", text="待加载", values=("选择 JSON/JSONL 会话工件后加载",), tags=("ok",))
+            return
+
+        summary = replay.final_summary
+        score_delta = _numeric_delta(summary.get("baseline_score"), summary.get("final_score"))
+        rows = [
+            ("session_id", replay.session_id or "-"),
+            ("plan_path", replay.plan_path or "-"),
+            ("jsonl_path", replay.jsonl_path or "-"),
+            ("transcript_path", replay.transcript_path or "-"),
+            ("baseline_score", summary.get("baseline_score", "-")),
+            ("final_score", summary.get("final_score", "-")),
+            ("score_delta", score_delta),
+            ("accepted", summary.get("accepted", "-")),
+            ("rolled_back", summary.get("rolled_back", "-")),
+            ("event_counts", replay.event_counts),
+        ]
+        for index, (label, value) in enumerate(rows):
+            tag = "evenrow" if index % 2 == 0 else "oddrow"
+            self.replay_summary_tree.insert("", "end", text=label, values=(self._display_value(value),), tags=(tag,))
+
+        for index, row in enumerate(replay.parameter_differences):
+            tag = "evenrow" if index % 2 == 0 else "oddrow"
+            self.replay_diff_tree.insert(
+                "",
+                "end",
+                text=str(row.get("key", "-")),
+                values=(
+                    self._display_value(row.get("baseline")),
+                    self._display_value(row.get("final")),
+                    self._display_value(row.get("delta")),
+                ),
+                tags=(tag,),
+            )
+
+        if replay.load_errors:
+            status = "可恢复加载问题" if replay.recoverable else "加载失败"
+            for error in replay.load_errors:
+                self.replay_error_tree.insert("", "end", text=status, values=(error,), tags=("recoverable",))
+            self.replay_status.set(f"{status}：{len(replay.load_errors)} 项；session={replay.session_id or '-'}")
+        else:
+            self.replay_error_tree.insert("", "end", text="ok", values=("回放加载完成",), tags=("ok",))
+            self.replay_status.set(f"已加载回放：{replay.session_id or '-'}")
+
     def _add_history_event(self, kind: str, detail: str) -> None:
         compact_detail = detail.strip()
         if len(compact_detail) > 180:
@@ -1934,15 +2337,18 @@ class TuningPanel(tk.Tk):
             messagebox.showerror("计划缺失", "请先校验有效的 mcu_tuning_plan.yaml。")
             return
         plan_path = Path(self.plan_path.get().strip())
-        self._open_transcript_file(prefix="desktop_session")
+        log_dir = self._session_log_dir()
         self.session_worker = SessionWorker(
             plan=self.plan,
             plan_path=plan_path,
+            log_dir=log_dir,
             output_queue=self.output_queue,
             transport_factory=self.session_transport_factory,
             active_parameter_keys=self.parameter_active_keys,
         )
         self.session = self.session_worker.session
+        self._open_transcript_file(prefix=self.session.session_id)
+        self._prepare_session_artifacts(log_dir)
         self.status.set("运行中")
         self._add_history_event("启动", "自动调参模式（TuningSession worker）")
         self._refresh_tuning_tree()
@@ -2219,6 +2625,7 @@ class TuningPanel(tk.Tk):
         self.status.set("空闲" if exit_code == 0 else "错误")
         self._add_history_event("结束", f"TuningSession worker 退出码 {exit_code}")
         self._close_transcript_file()
+        self._write_session_final_artifacts(exit_code)
         self._refresh_tuning_tree()
 
     def _handle_line(self, line: str) -> None:
@@ -2319,10 +2726,17 @@ class TuningPanel(tk.Tk):
             tag = "evenrow" if index % 2 == 0 else "oddrow"
             self.dat_tree.insert("", "end", text=str(key), values=(str(value),), tags=(tag,))
 
+    def _session_log_dir(self) -> Path:
+        base = (
+            Path(self.plan_path.get()).parent
+            if self.plan_path.get().strip()
+            else Path.home() / "AppData" / "Local" / "Temp"
+        )
+        return base / "mcu_tuning_logs"
+
     def _open_transcript_file(self, prefix: str = "desktop_panel") -> None:
         self._close_transcript_file()
-        base = Path(self.plan_path.get()).parent if self.plan_path.get().strip() else Path.home() / "AppData" / "Local" / "Temp"
-        log_dir = base / "mcu_tuning_logs"
+        log_dir = self._session_log_dir()
         log_dir.mkdir(parents=True, exist_ok=True)
         path = log_dir / f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
         self.transcript_path.set(str(path))
@@ -2333,6 +2747,82 @@ class TuningPanel(tk.Tk):
         if self.transcript_handle is not None:
             self.transcript_handle.close()
             self.transcript_handle = None
+
+    def _prepare_session_artifacts(self, log_dir: Path) -> None:
+        if self.session is None:
+            return
+        session_id = str(getattr(self.session, "session_id", "session"))
+        log_dir.mkdir(parents=True, exist_ok=True)
+        jsonl_path = log_dir / f"{session_id}.jsonl"
+        snapshot_path = log_dir / f"{session_id}_plan_snapshot.yaml"
+        summary_path = log_dir / f"{session_id}_summary.json"
+        manifest_path = log_dir / f"{session_id}_session.json"
+        transcript = self.transcript_path.get()
+        self.current_session_artifacts = {
+            "session_id": session_id,
+            "plan_path": str(Path(self.plan_path.get()).resolve()) if self.plan_path.get().strip() else "",
+            "session_log": str(jsonl_path),
+            "transcript": transcript if transcript != "-" else "",
+            "plan_snapshot": str(snapshot_path),
+            "final_summary": str(summary_path),
+            "manifest": str(manifest_path),
+        }
+        try:
+            if self.plan_path.get().strip() and Path(self.plan_path.get()).exists():
+                shutil.copy2(Path(self.plan_path.get()), snapshot_path)
+            elif self.plan is not None:
+                snapshot_path.write_text(json.dumps(self.plan, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._write_session_manifest("started")
+        except OSError as exc:
+            self._add_history_event("回放", f"会话工件写入失败：{exc}")
+
+    def _write_session_manifest(self, status: str, exit_code: int | None = None) -> None:
+        manifest_path = self.current_session_artifacts.get("manifest")
+        if not manifest_path:
+            return
+        payload = {
+            "schema_version": SESSION_REPLAY_SCHEMA_VERSION,
+            "artifact_type": "tuning_session_manifest",
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "status": status,
+            "session_id": self.current_session_artifacts.get("session_id"),
+            "plan_path": self.current_session_artifacts.get("plan_path"),
+            "last_exit_code": exit_code,
+            "artifact_paths": {
+                key: value
+                for key, value in self.current_session_artifacts.items()
+                if key not in {"session_id", "plan_path"} and value
+            },
+        }
+        Path(manifest_path).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _write_session_final_artifacts(self, exit_code: int | None) -> None:
+        if self.session is None or not self.current_session_artifacts:
+            return
+        summary_path = self.current_session_artifacts.get("final_summary")
+        if not summary_path:
+            return
+        try:
+            summary = self.session.summary()
+            payload = {
+                "schema_version": SESSION_REPLAY_SCHEMA_VERSION,
+                "artifact_type": "tuning_session_summary",
+                "generated_at": datetime.now().isoformat(timespec="seconds"),
+                "session_id": self.current_session_artifacts.get("session_id"),
+                "plan_path": self.current_session_artifacts.get("plan_path"),
+                "last_exit_code": exit_code,
+                "summary": summary,
+                "artifact_paths": {
+                    key: value
+                    for key, value in self.current_session_artifacts.items()
+                    if key not in {"session_id", "plan_path"} and value
+                },
+            }
+            Path(summary_path).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._write_session_manifest("finished", exit_code)
+            self._add_history_event("回放", f"会话工件已保存：{self.current_session_artifacts.get('manifest')}")
+        except OSError as exc:
+            self._add_history_event("回放", f"会话工件写入失败：{exc}")
 
     def _dispatch_session_control(self, method_name: str, label: str, *args: Any, **kwargs: Any) -> Any:
         if self.session is None or not hasattr(self.session, method_name):

@@ -406,7 +406,7 @@
         "Tests pass for session metadata loading, replay summary parsing, and corrupt-log handling."
       ],
       "priority": 25,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
