@@ -240,7 +240,7 @@
         "Tests pass for deterministic score progression and expected decision counts."
       ],
       "priority": 15,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

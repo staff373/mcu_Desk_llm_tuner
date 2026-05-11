@@ -18,6 +18,7 @@ Started: 2026-05-11 12:00:00
 - Standardized session failures should emit `error` events with `category`, `code`, `error_code`, `recoverable`, `state`, `action`, and `session_id`; these events are also JSONL records.
 - Real serial access in `TuningSession` now goes through `PySerialTransport.from_config`; constructing the transport is side-effect free, and no-hardware tests can inject `transport_factory` instead of patching GUI or CLI layers.
 - Virtual no-hardware flows should inject `VirtualTransport` through `TuningSession.transport_factory`; it is opt-in and never selected by port name or CLI defaults.
+- Virtual scoring targets can be declared per test-only fixture parameter with `virtual_target`; `VirtualTransport` falls back to `current` when no target is declared.
 
 ## 2026-05-11 12:14:10 - US-001
 - Implemented stable `TuningSessionState` values and readable `TuningSession.state`, initialized to `idle` without opening serial.
@@ -192,4 +193,17 @@ Started: 2026-05-11 12:00:00
 - Learnings for future iterations:
   - The shared virtual fixture lives at `fixtures/virtual_mcu_tuning_plan.yaml` and uses `VIRTUAL_NO_HARDWARE_TEST_ONLY` as its transport port.
   - Fixture validation should assert both schema validity and test-only labeling so virtual artifacts are not mistaken for real hardware evidence.
+---
+
+## 2026-05-11 13:59:50 - US-015
+- Implemented deterministic virtual scoring targets through per-parameter `virtual_target` values used by `VirtualTransport`.
+- Updated the shared no-hardware virtual fixture so the scripted run produces accept, hold, and rollback decisions with repeatable final summary content.
+- Files changed: `tuning_session.py`, `fixtures/virtual_mcu_tuning_plan.yaml`, `test_tuning_session_virtual_scoring.py`, `scripts/ralph/prd.json`, `scripts/ralph/progress.txt`, `project_status.md`, `.project_checkpoints/US-015/20260511-135650/`.
+- Verification commands and results: `python -m py_compile tuning_session.py test_tuning_session_virtual_scoring.py validate_plan.py` passed; `python validate_plan.py .\fixtures\virtual_mcu_tuning_plan.yaml` passed with `RESULT: valid`; `python -m unittest test_tuning_session_virtual_scoring.py` passed with 2 tests; `python -m unittest test_tuning_session_virtual_transport.py` passed with 2 tests; `python -m unittest discover -p "test_tuning_session*.py"` passed with 38 tests.
+- Checkpoint path: `.project_checkpoints/US-015/20260511-135650/`
+- Real serial status: not opened
+- Learnings for future iterations:
+  - `VirtualTransport` now reads `virtual_target` from fixture parameters and keeps direct `target_parameters=...` injection for tests that need custom targets.
+  - The shared virtual fixture currently yields deterministic decision counts: 4 accept, 2 hold, and 2 rollback over 8 rounds.
+  - Summary determinism checks should normalize generated artifact paths such as `log_path`, because those paths intentionally include per-run temporary locations.
 ---

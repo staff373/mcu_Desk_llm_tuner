@@ -338,6 +338,18 @@ def _parameter_command_pattern(template: str, parameter_keys: list[str]) -> re.P
     return re.compile(f"^{pattern}$")
 
 
+def _virtual_target_parameters(
+    plan: dict[str, Any],
+    current_parameters: dict[str, float],
+) -> dict[str, float]:
+    targets = dict(current_parameters)
+    for param in plan.get("parameters", []):
+        key = str(param.get("key", ""))
+        if key in targets and "virtual_target" in param:
+            targets[key] = float(param["virtual_target"])
+    return targets
+
+
 class VirtualTransport:
     """Deterministic no-hardware transport for tests and probe scripts."""
 
@@ -362,7 +374,11 @@ class VirtualTransport:
             param["key"]: float(param["current"])
             for param in plan.get("parameters", [])
         }
-        self.target_parameters = dict(target_parameters or self.parameters)
+        self.target_parameters = (
+            dict(target_parameters)
+            if target_parameters is not None
+            else _virtual_target_parameters(plan, self.parameters)
+        )
         parameter_keys = list(self.parameters)
         self._set_pattern = _parameter_command_pattern(plan["commands"]["set"], parameter_keys)
         self._rollback_pattern = _parameter_command_pattern(plan["rollback"]["command_template"], parameter_keys)
