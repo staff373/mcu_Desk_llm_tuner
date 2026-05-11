@@ -304,7 +304,7 @@
         "Tests pass for direct-session worker lifecycle and fallback mode selection."
       ],
       "priority": 19,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {

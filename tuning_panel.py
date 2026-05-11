@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import queue
 import re
 import subprocess
@@ -13,7 +14,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import tkinter as tk
 from tkinter import filedialog, font as tkfont, messagebox, ttk
@@ -24,10 +25,79 @@ except ImportError as exc:  # pragma: no cover - script layout dependent
     print("ERROR: validate_plan.py must be in the same scripts directory.", file=sys.stderr)
     raise SystemExit(3) from exc
 
+try:
+    from tuning_session import TuningEvent, TuningSession
+except ImportError as exc:  # pragma: no cover - script layout dependent
+    print("ERROR: tuning_session.py must be in the same scripts directory.", file=sys.stderr)
+    raise SystemExit(3) from exc
+
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 RUN_SCRIPT = SCRIPT_DIR / "run_tuning_plan.py"
 MONITOR_SCRIPT = SCRIPT_DIR / "monitor_tuning_plan.py"
+SESSION_EVENT = "__SESSION_EVENT__"
+SESSION_DONE = "__SESSION_DONE__"
+SESSION_ERROR = "__SESSION_ERROR__"
+
+
+TransportFactory = Callable[[dict[str, Any]], Any]
+
+
+def select_execution_backend(mode: str, run_backend: str) -> str:
+    if mode == "demo":
+        return "demo"
+    if mode == "monitor":
+        return "subprocess"
+    if mode == "run" and run_backend == "session":
+        return "session"
+    return "subprocess"
+
+
+class SessionWorker:
+    """Run a TuningSession off the Tk main thread and forward events by queue."""
+
+    def __init__(
+        self,
+        *,
+        plan: dict[str, Any],
+        plan_path: Path,
+        output_queue: queue.Queue[Any],
+        log_dir: Path | None = None,
+        transport_factory: TransportFactory | None = None,
+    ) -> None:
+        self.output_queue = output_queue
+        self.session = TuningSession(
+            plan=plan,
+            plan_path=plan_path,
+            log_dir=log_dir,
+            event_handler=self._enqueue_event,
+            transport_factory=transport_factory,
+        )
+        self.thread = threading.Thread(target=self._run, name="tuning-session-worker", daemon=True)
+        self.exit_code: int | None = None
+        self.error: BaseException | None = None
+
+    def _enqueue_event(self, event: TuningEvent) -> None:
+        self.output_queue.put((SESSION_EVENT, event))
+
+    def start(self) -> None:
+        self.thread.start()
+
+    def is_alive(self) -> bool:
+        return self.thread.is_alive()
+
+    def join(self, timeout: float | None = None) -> None:
+        self.thread.join(timeout)
+
+    def _run(self) -> None:
+        try:
+            self.exit_code = self.session.run()
+        except BaseException as exc:  # noqa: BLE001 - surface worker failures to the GUI queue
+            self.error = exc
+            self.exit_code = 1
+            self.output_queue.put((SESSION_ERROR, exc))
+        finally:
+            self.output_queue.put((SESSION_DONE, self.exit_code))
 
 
 DEMO_LINES = [
@@ -66,7 +136,13 @@ DEMO_LINES = [
 
 
 class TuningPanel(tk.Tk):
-    def __init__(self, auto_demo: bool = False) -> None:
+    def __init__(
+        self,
+        auto_demo: bool = False,
+        *,
+        run_backend: str | None = None,
+        session_transport_factory: TransportFactory | None = None,
+    ) -> None:
         super().__init__()
         self.title("MCU 蓝牙调参面板")
         self.geometry("1180x760")
@@ -91,9 +167,14 @@ class TuningPanel(tk.Tk):
 
         self.plan: dict[str, Any] | None = None
         self.session: Any | None = None
+        self.session_worker: SessionWorker | None = None
+        self.session_transport_factory = session_transport_factory
+        self.run_backend = run_backend or os.environ.get("MCU_TUNING_PANEL_RUN_BACKEND", "session")
+        if self.run_backend not in {"session", "subprocess"}:
+            self.run_backend = "session"
         self.proc: subprocess.Popen[str] | None = None
         self.reader_thread: threading.Thread | None = None
-        self.output_queue: queue.Queue[str] = queue.Queue()
+        self.output_queue: queue.Queue[Any] = queue.Queue()
         self.stop_requested = False
         self.demo_index = 0
         self.transcript_handle: Any | None = None
@@ -719,21 +800,33 @@ class TuningPanel(tk.Tk):
             old_values[1] = str(value)
             self.param_tree.item(item_id, values=old_values)
 
+    def _task_running(self) -> bool:
+        return self.proc is not None or (self.session_worker is not None and self.session_worker.is_alive())
+
     def start(self) -> None:
-        if self.proc is not None:
+        if self._task_running():
             messagebox.showinfo("正在运行", "当前已有任务正在运行。")
             return
         self.clear_log()
         self.stop_requested = False
-        if self.mode.get() == "demo":
+        backend = select_execution_backend(self.mode.get(), self.run_backend)
+        if backend == "demo":
             self._start_demo()
             return
         if not self.validate_current_plan():
             return
+        if backend == "session":
+            self._start_session_worker()
+            return
+        self._start_subprocess()
+
+    def _start_subprocess(self) -> None:
         args = self._build_process_args()
         self._open_transcript_file()
         self.status.set("运行中")
-        self._add_history_event("启动", f"{self.mode.get()} 模式")
+        self.session = None
+        self.session_worker = None
+        self._add_history_event("启动", f"{self.mode.get()} 模式（子进程）")
         self._refresh_tuning_tree()
         self.proc = subprocess.Popen(
             args,
@@ -748,6 +841,24 @@ class TuningPanel(tk.Tk):
         )
         self.reader_thread = threading.Thread(target=self._read_process_output, daemon=True)
         self.reader_thread.start()
+
+    def _start_session_worker(self) -> None:
+        if self.plan is None:
+            messagebox.showerror("计划缺失", "请先校验有效的 mcu_tuning_plan.yaml。")
+            return
+        plan_path = Path(self.plan_path.get().strip())
+        self._open_transcript_file(prefix="desktop_session")
+        self.session_worker = SessionWorker(
+            plan=self.plan,
+            plan_path=plan_path,
+            output_queue=self.output_queue,
+            transport_factory=self.session_transport_factory,
+        )
+        self.session = self.session_worker.session
+        self.status.set("运行中")
+        self._add_history_event("启动", "自动调参模式（TuningSession worker）")
+        self._refresh_tuning_tree()
+        self.session_worker.start()
 
     def _build_process_args(self) -> list[str]:
         plan = self.plan_path.get().strip()
@@ -794,9 +905,19 @@ class TuningPanel(tk.Tk):
     def _pump_output(self) -> None:
         while True:
             try:
-                line = self.output_queue.get_nowait()
+                item = self.output_queue.get_nowait()
             except queue.Empty:
                 break
+            if isinstance(item, tuple) and item:
+                kind = item[0]
+                if kind == SESSION_EVENT:
+                    self._handle_session_event(item[1])
+                elif kind == SESSION_ERROR:
+                    self._handle_session_error(item[1])
+                elif kind == SESSION_DONE:
+                    self._handle_session_done(item[1])
+                continue
+            line = str(item)
             if line == "__PROCESS_DONE__":
                 self.proc = None
                 self.status.set("空闲")
@@ -806,6 +927,58 @@ class TuningPanel(tk.Tk):
             else:
                 self._handle_line(line)
         self.after(80, self._pump_output)
+
+    def _handle_session_event(self, event: TuningEvent) -> None:
+        line = self._session_event_to_line(event)
+        self._handle_line(line)
+        if event.type == "state":
+            next_state = event.data.get("next_state")
+            if next_state:
+                self.status.set(str(next_state))
+        elif event.type == "error":
+            self.status.set("error")
+
+    def _session_event_to_line(self, event: TuningEvent) -> str:
+        if event.type in {"tx", "rx"}:
+            return f"{event.type.upper()} {event.message}"
+        if event.type == "dat":
+            sample = event.data.get("sample")
+            payload = json.dumps(sample, ensure_ascii=False) if isinstance(sample, dict) else event.message
+            return f"DAT {payload}"
+        if event.type == "summary":
+            return f"Summary: {json.dumps(event.data.get('summary', {}), ensure_ascii=False)}"
+        if event.type == "state":
+            previous_state = event.data.get("previous_state", "-")
+            next_state = event.data.get("next_state", "-")
+            reason = event.data.get("reason", "-")
+            return f"STATE {previous_state} -> {next_state} ({reason})"
+        if event.type == "action":
+            action = event.data.get("action", "action")
+            return event.message or f"ACTION {action}"
+        if event.type == "action_rejected":
+            code = event.data.get("error_code") or event.data.get("code") or "action_rejected"
+            return event.message or f"ERROR [{code}] action rejected"
+        if event.type == "record":
+            record = event.data.get("record", {})
+            return f"RECORD {json.dumps(record, ensure_ascii=False)}"
+        if event.type == "warning":
+            return f"WARN {event.message}"
+        if event.type == "error":
+            code = event.data.get("error_code") or event.data.get("code") or "unknown"
+            return f"ERROR [{code}] {event.message}"
+        return event.message or event.type
+
+    def _handle_session_error(self, exc: BaseException) -> None:
+        self.status.set("error")
+        self._handle_line(f"ERROR [session_worker] {exc}")
+        self._add_history_event("错误", f"session_worker: {exc}")
+
+    def _handle_session_done(self, exit_code: int | None) -> None:
+        self.session_worker = None
+        self.status.set("空闲" if exit_code == 0 else "错误")
+        self._add_history_event("结束", f"TuningSession worker 退出码 {exit_code}")
+        self._close_transcript_file()
+        self._refresh_tuning_tree()
 
     def _handle_line(self, line: str) -> None:
         tagged_line = f"{datetime.now().strftime('%H:%M:%S')} {line}"
@@ -917,6 +1090,14 @@ class TuningPanel(tk.Tk):
 
     def stop(self) -> None:
         self.stop_requested = True
+        if self.session_worker is not None and self.session_worker.is_alive():
+            if self.session is not None and hasattr(self.session, "request_stop"):
+                self.session.request_stop()
+            self.status.set("停止中")
+            self.stop_reason.set("手动停止")
+            self._add_history_event("停止", "用户请求 TuningSession 停止")
+            self._refresh_tuning_tree()
+            return
         if self.proc is not None:
             try:
                 self.proc.terminate()
@@ -931,6 +1112,14 @@ class TuningPanel(tk.Tk):
 
     def emergency_stop(self) -> None:
         self.stop_requested = True
+        if self.session_worker is not None and self.session_worker.is_alive():
+            if self.session is not None and hasattr(self.session, "emergency_stop"):
+                self.session.emergency_stop()
+            self.status.set("急停")
+            self.stop_reason.set("operator_abort")
+            self._add_history_event("急停", "operator_abort")
+            self._refresh_tuning_tree()
+            return
         if self.session is not None and hasattr(self.session, "emergency_stop"):
             self.session.emergency_stop()
         if self.proc is not None:
@@ -977,15 +1166,30 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="打开 MCU 蓝牙调参桌面面板。")
     parser.add_argument("--plan", type=Path, default=None, help="Optional mcu_tuning_plan.yaml to preload")
     parser.add_argument("--mode", choices=["demo", "monitor", "run"], default="demo")
+    parser.add_argument(
+        "--run-backend",
+        choices=["session", "subprocess"],
+        default=os.environ.get("MCU_TUNING_PANEL_RUN_BACKEND", "session"),
+        help="Automatic tuning backend: direct TuningSession worker or legacy subprocess runner",
+    )
     parser.add_argument("--auto-start", action="store_true", help="Start the selected mode after launch")
     parser.add_argument("--self-test", action="store_true", help="Import and initialize core classes, then exit")
+    parser.add_argument("--hidden-init-test", action="store_true", help="Create a hidden Tk panel and exit")
     args = parser.parse_args(argv)
 
     if args.self_test:
         print("RESULT: tuning_panel self-test ok")
         return 0
 
-    app = TuningPanel(auto_demo=args.auto_start and args.mode == "demo")
+    if args.hidden_init_test:
+        app = TuningPanel(run_backend=args.run_backend)
+        app.withdraw()
+        app.update_idletasks()
+        app.destroy()
+        print("RESULT: tuning_panel hidden init ok")
+        return 0
+
+    app = TuningPanel(auto_demo=args.auto_start and args.mode == "demo", run_backend=args.run_backend)
     app.mode.set(args.mode)
     if args.plan is not None:
         app.plan_path.set(str(args.plan.resolve()))
