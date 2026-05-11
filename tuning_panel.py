@@ -19,6 +19,8 @@ from typing import Any, Callable
 import tkinter as tk
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
+from serial.tools import list_ports
+
 try:
     from validate_plan import load_plan, validate_plan
 except ImportError as exc:  # pragma: no cover - script layout dependent
@@ -26,7 +28,7 @@ except ImportError as exc:  # pragma: no cover - script layout dependent
     raise SystemExit(3) from exc
 
 try:
-    from tuning_session import TuningEvent, TuningSession
+    from tuning_session import PySerialTransport, TuningEvent, TuningSession
 except ImportError as exc:  # pragma: no cover - script layout dependent
     print("ERROR: tuning_session.py must be in the same scripts directory.", file=sys.stderr)
     raise SystemExit(3) from exc
@@ -153,6 +155,9 @@ class TuningPanel(tk.Tk):
         self.status = tk.StringVar(value="空闲")
         self.port = tk.StringVar(value="-")
         self.baudrate = tk.StringVar(value="-")
+        self.connection_state = tk.StringVar(value="未连接")
+        self.detected_ports = tk.StringVar(value="未检测")
+        self.connection_detail = tk.StringVar(value="未加载计划")
         self.score = tk.StringVar(value="-")
         self.decision = tk.StringVar(value="-")
         self.transcript_path = tk.StringVar(value="-")
@@ -166,9 +171,12 @@ class TuningPanel(tk.Tk):
         self.plan_status = tk.StringVar(value="未加载")
 
         self.plan: dict[str, Any] | None = None
+        self.validated_plan_path: Path | None = None
         self.session: Any | None = None
         self.session_worker: SessionWorker | None = None
         self.operator_buttons: dict[str, ttk.Button] = {}
+        self.connection_buttons: dict[str, ttk.Button] = {}
+        self.connection_transport: Any | None = None
         self.session_transport_factory = session_transport_factory
         self.run_backend = run_backend or os.environ.get("MCU_TUNING_PANEL_RUN_BACKEND", "session")
         if self.run_backend not in {"session", "subprocess"}:
@@ -367,6 +375,7 @@ class TuningPanel(tk.Tk):
         self.notebook.grid(row=1, column=0, sticky="nsew")
 
         self._build_overview_page()
+        self._build_connection_page()
         self._build_plan_page()
         self._build_monitor_page()
         self._build_tuning_page()
@@ -389,6 +398,18 @@ class TuningPanel(tk.Tk):
         button = ttk.Button(parent, text=text, command=command, style=style)
         button.pack(side="left", padx=(0, 8))
         self.operator_buttons[name] = button
+
+    def _add_connection_button(
+        self,
+        parent: ttk.Frame,
+        name: str,
+        text: str,
+        command: Callable[[], Any],
+        style: str | None = None,
+    ) -> None:
+        button = ttk.Button(parent, text=text, command=command, style=style)
+        button.pack(side="left", padx=(0, 8))
+        self.connection_buttons[name] = button
 
     def _build_overview_page(self) -> None:
         page = ttk.Frame(self.notebook, padding=14)
@@ -425,6 +446,51 @@ class TuningPanel(tk.Tk):
         self.param_tree.tag_configure("oddrow", background=self.colors["panel_soft"])
         self.param_tree.tag_configure("evenrow", background="#ffffff")
         self.param_tree.pack(fill="both", expand=True, pady=(10, 0))
+
+    def _build_connection_page(self) -> None:
+        page = ttk.Frame(self.notebook, padding=14)
+        self.notebook.add(page, text="连接")
+        page.columnconfigure(0, weight=0, minsize=320)
+        page.columnconfigure(1, weight=1)
+        page.rowconfigure(0, weight=1)
+
+        sidebar = ttk.Frame(page)
+        sidebar.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
+        sidebar.columnconfigure(0, weight=1)
+
+        self._metric_card(sidebar, "连接状态", self.connection_state, 0)
+        self._metric_card(sidebar, "YAML 串口", self.port, 1)
+        self._metric_card(sidebar, "YAML 波特率", self.baudrate, 2)
+        self._metric_card(sidebar, "检测端口", self.detected_ports, 3)
+
+        control_card = ttk.Frame(sidebar, style="Card.TFrame", padding=12)
+        control_card.grid(row=4, column=0, sticky="ew", pady=(0, 10))
+        ttk.Label(control_card, text="连接控制", style="CardTitle.TLabel").pack(anchor="w")
+        ttk.Label(control_card, textvariable=self.connection_detail, style="Muted.TLabel").pack(anchor="w", pady=(6, 10))
+        buttons = ttk.Frame(control_card, style="Card.TFrame")
+        buttons.pack(anchor="w")
+        self._add_connection_button(buttons, "detect_ports", "检测端口", self.detect_ports_action)
+        self._add_connection_button(buttons, "connect", "连接", self.connect_transport, "Accent.TButton")
+        self._add_connection_button(buttons, "disconnect", "断开", self.disconnect_transport, "Danger.TButton")
+
+        metadata_card = ttk.Frame(page, style="Card.TFrame", padding=12)
+        metadata_card.grid(row=0, column=1, sticky="nsew")
+        metadata_card.rowconfigure(1, weight=1)
+        metadata_card.columnconfigure(0, weight=1)
+        ttk.Label(metadata_card, text="YAML transport 元数据", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+        self.connection_tree = ttk.Treeview(metadata_card, columns=("value",), show="tree headings", height=14)
+        self.connection_tree.heading("#0", text="项目")
+        self.connection_tree.heading("value", text="值")
+        self.connection_tree.column("#0", width=260)
+        self.connection_tree.column("value", width=520)
+        self.connection_tree.tag_configure("oddrow", background=self.colors["panel_soft"])
+        self.connection_tree.tag_configure("evenrow", background="#ffffff")
+        self.connection_tree.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
+        scroll = ttk.Scrollbar(metadata_card, orient="vertical", command=self.connection_tree.yview)
+        scroll.grid(row=1, column=1, sticky="ns", pady=(10, 0))
+        self.connection_tree.configure(yscrollcommand=scroll.set)
+        self._populate_connection_tree(None)
+        self._refresh_connection_controls()
 
     def _build_plan_page(self) -> None:
         page = ttk.Frame(self.notebook, padding=14)
@@ -601,6 +667,8 @@ class TuningPanel(tk.Tk):
 
     def validate_current_plan(self) -> bool:
         if self.mode.get() == "demo" and not self.plan_path.get().strip():
+            self.plan = None
+            self.validated_plan_path = None
             self.status.set("演示就绪")
             self.plan_status.set("演示模式：未加载 YAML")
             self._load_demo_params()
@@ -610,7 +678,12 @@ class TuningPanel(tk.Tk):
         if not path.exists():
             self.status.set("计划缺失")
             self.plan_status.set("计划缺失")
+            self.plan = None
+            self.validated_plan_path = None
             self._populate_plan_tree(None)
+            self._populate_connection_tree(None)
+            self.connection_state.set("未连接")
+            self.connection_detail.set("请先校验 YAML 计划")
             messagebox.showerror("计划缺失", "请先选择有效的 mcu_tuning_plan.yaml。")
             return False
         try:
@@ -619,17 +692,28 @@ class TuningPanel(tk.Tk):
         except Exception as exc:  # noqa: BLE001 - show practical UI error
             self.status.set("计划无效")
             self.plan_status.set("校验失败")
+            self.plan = None
+            self.validated_plan_path = None
             self._populate_plan_tree(None)
+            self._populate_connection_tree(None)
+            self.connection_state.set("未连接")
+            self.connection_detail.set("YAML 校验失败")
             messagebox.showerror("校验失败", str(exc))
             return False
         if validator.errors:
             self.status.set("计划无效")
             self.plan_status.set(f"校验失败：{len(validator.errors)} 项错误")
+            self.plan = None
+            self.validated_plan_path = None
             self._populate_plan_tree(plan)
+            self._populate_connection_tree(plan)
+            self.connection_state.set("未连接")
+            self.connection_detail.set("YAML 校验失败")
             self._add_history_event("校验", f"失败：{'; '.join(validator.errors[:3])}")
             messagebox.showerror("校验失败", "\n".join(validator.errors[:12]))
             return False
         self.plan = plan
+        self.validated_plan_path = path.resolve()
         self._load_plan_summary(plan)
         self.status.set("计划有效")
         self.plan_status.set("计划有效")
@@ -640,6 +724,9 @@ class TuningPanel(tk.Tk):
         transport = plan.get("transport", {})
         self.port.set(str(transport.get("port", "-")))
         self.baudrate.set(str(transport.get("baudrate", "-")))
+        if self.connection_transport is None:
+            self.connection_state.set("计划已校验，未连接")
+            self.connection_detail.set(f"{self.port.get()} @ {self.baudrate.get()} 已从 YAML 加载")
         self.param_tree.delete(*self.param_tree.get_children())
         for index, param in enumerate(plan.get("parameters", [])):
             key = param.get("key", "-")
@@ -649,11 +736,14 @@ class TuningPanel(tk.Tk):
             tag = "evenrow" if index % 2 == 0 else "oddrow"
             self.param_tree.insert("", "end", iid=str(key), values=(key, current, bounds, role), tags=(tag,))
         self._populate_plan_tree(plan)
+        self._populate_connection_tree(plan)
         self._refresh_tuning_tree()
 
     def _load_demo_params(self) -> None:
         self.port.set("DEMO")
         self.baudrate.set("115200")
+        self.connection_state.set("演示模式")
+        self.connection_detail.set("演示模式未打开真实串口")
         self.param_tree.delete(*self.param_tree.get_children())
         for index, (key, current, bounds, role) in enumerate([
             ("kp_x", "350", "100..600", "primary"),
@@ -681,6 +771,7 @@ class TuningPanel(tk.Tk):
             "step_policy": {"max_rounds": 2, "parameter_order": ["kp_x", "kd_x"]},
         }
         self._populate_plan_tree(demo_plan)
+        self._populate_connection_tree(demo_plan)
 
     def _display_value(self, value: Any) -> str:
         if value is None:
@@ -767,6 +858,157 @@ class TuningPanel(tk.Tk):
         else:
             insert(stop_id, "conditions", stop_conditions)
 
+    def _populate_connection_tree(self, plan: dict[str, Any] | None) -> None:
+        if not hasattr(self, "connection_tree"):
+            return
+        self.connection_tree.delete(*self.connection_tree.get_children())
+        row_index = 0
+
+        def insert(label: str, value: Any) -> None:
+            nonlocal row_index
+            tag = "evenrow" if row_index % 2 == 0 else "oddrow"
+            row_index += 1
+            self.connection_tree.insert(
+                "",
+                "end",
+                text=label,
+                values=(self._display_value(value),),
+                tags=(tag,),
+            )
+
+        insert("连接状态", self.connection_state.get())
+        insert("检测端口", self.detected_ports.get())
+        if plan is None:
+            insert("YAML transport", "未加载")
+            insert("连接要求", "真实传输连接前必须先校验 YAML 计划")
+            return
+
+        transport = plan.get("transport", {})
+        for key in (
+            "port",
+            "baudrate",
+            "data_bits",
+            "parity",
+            "stop_bits",
+            "line_ending",
+            "read_timeout_ms",
+            "write_timeout_ms",
+        ):
+            insert(key, transport.get(key))
+        mode = "真实 pyserial 传输" if self.session_transport_factory is None else "注入传输"
+        insert("transport_mode", mode)
+        insert("连接要求", "已校验 YAML 计划")
+
+    def _set_connection_button_enabled(self, name: str, enabled: bool) -> None:
+        button = self.connection_buttons.get(name)
+        if button is None:
+            return
+        button.configure(state="normal" if enabled else "disabled")
+
+    def _refresh_connection_controls(self) -> None:
+        if not self.connection_buttons:
+            return
+        running = self._task_running()
+        connected = self.connection_transport is not None
+        self._set_connection_button_enabled("detect_ports", not running)
+        self._set_connection_button_enabled("connect", not running and not connected)
+        self._set_connection_button_enabled("disconnect", connected)
+        self._populate_connection_tree(self.plan)
+
+    def detect_ports_action(self) -> list[str]:
+        try:
+            ports = list(list_ports.comports())
+        except Exception as exc:  # noqa: BLE001 - port enumeration can fail by platform
+            self.detected_ports.set("检测失败")
+            self.connection_detail.set(f"端口检测失败：{exc}")
+            self._add_history_event("连接", f"端口检测失败：{exc}")
+            self._refresh_connection_controls()
+            return []
+
+        labels: list[str] = []
+        for port_info in ports:
+            device = str(getattr(port_info, "device", "") or getattr(port_info, "name", "") or port_info)
+            description = str(getattr(port_info, "description", "") or "")
+            labels.append(f"{device} ({description})" if description and description != device else device)
+        self.detected_ports.set(", ".join(labels) if labels else "未发现串口")
+        if self.connection_transport is None:
+            self.connection_state.set("已检测，未连接")
+        self.connection_detail.set("端口检测未建立连接，也未发送串口命令")
+        self._add_history_event("连接", f"端口检测：{self.detected_ports.get()}")
+        self._refresh_connection_controls()
+        return labels
+
+    def _reject_connection_action(self, detail: str) -> bool:
+        self.connection_state.set("连接拒绝")
+        self.connection_detail.set(detail)
+        self._add_history_event("连接", f"拒绝：{detail}")
+        self._refresh_connection_controls()
+        return False
+
+    def connect_transport(self) -> bool:
+        if self.connection_transport is not None:
+            self.connection_state.set("已连接")
+            self.connection_detail.set("当前已有活动连接")
+            self._refresh_connection_controls()
+            return True
+        if self._task_running():
+            return self._reject_connection_action("当前任务运行中，不能单独连接")
+        if self.plan is None or self.validated_plan_path is None:
+            return self._reject_connection_action("请先校验 YAML 计划")
+        selected_path = self.plan_path.get().strip()
+        if selected_path and Path(selected_path).resolve() != self.validated_plan_path:
+            return self._reject_connection_action("YAML 计划已变更，请重新校验")
+
+        transport_config = self.plan.get("transport")
+        if not isinstance(transport_config, dict):
+            return self._reject_connection_action("YAML transport 配置缺失")
+
+        factory = self.session_transport_factory or PySerialTransport.from_config
+        port = str(transport_config.get("port", "-"))
+        baudrate = str(transport_config.get("baudrate", "-"))
+        try:
+            self.connection_transport = factory(transport_config).open()
+        except Exception as exc:  # noqa: BLE001 - keep GUI responsive on platform/driver failures
+            self.connection_transport = None
+            self.connection_state.set("连接失败")
+            self.connection_detail.set(f"{port} @ {baudrate} 连接失败：{exc}")
+            self._add_history_event("连接", f"失败：{exc}")
+            self._refresh_connection_controls()
+            return False
+
+        self.connection_state.set("已连接")
+        self.connection_detail.set(f"{port} @ {baudrate} 已连接")
+        self.status.set("已连接")
+        self._add_history_event("连接", f"已连接：{port} @ {baudrate}")
+        self._refresh_connection_controls()
+        return True
+
+    def disconnect_transport(self, *, record_history: bool = True) -> bool:
+        if self.connection_transport is None:
+            self.connection_state.set("未连接")
+            self.connection_detail.set("无活动连接")
+            self._refresh_connection_controls()
+            return False
+
+        transport = self.connection_transport
+        self.connection_transport = None
+        try:
+            transport.close()
+        except Exception as exc:  # noqa: BLE001 - close failures should not leave stale GUI state
+            self.connection_state.set("断开失败")
+            self.connection_detail.set(f"断开连接失败：{exc}")
+            if record_history:
+                self._add_history_event("连接", f"断开失败：{exc}")
+            self._refresh_connection_controls()
+            return False
+
+        self.connection_state.set("已断开")
+        self.connection_detail.set("连接已关闭")
+        if record_history:
+            self._add_history_event("连接", "已断开")
+        self._refresh_connection_controls()
+        return True
+
     def _refresh_tuning_tree(self) -> None:
         if not hasattr(self, "tuning_tree"):
             return
@@ -788,6 +1030,7 @@ class TuningPanel(tk.Tk):
             tag = "evenrow" if index % 2 == 0 else "oddrow"
             self.tuning_tree.insert("", "end", text=label, values=(value,), tags=(tag,))
         self._refresh_operator_controls()
+        self._refresh_connection_controls()
 
     def _add_history_event(self, kind: str, detail: str) -> None:
         compact_detail = detail.strip()
@@ -875,6 +1118,9 @@ class TuningPanel(tk.Tk):
     def start(self) -> None:
         if self._task_running():
             messagebox.showinfo("正在运行", "当前已有任务正在运行。")
+            return
+        if self.connection_transport is not None:
+            messagebox.showinfo("连接已打开", "请先在连接页断开当前连接，再启动观测或自动调参。")
             return
         self.clear_log()
         self.stop_requested = False
@@ -1395,6 +1641,7 @@ class TuningPanel(tk.Tk):
         subprocess.Popen(["notepad.exe", path])
 
     def destroy(self) -> None:
+        self.disconnect_transport(record_history=False)
         self.stop()
         super().destroy()
 

@@ -355,7 +355,7 @@
         "Tests pass for no-auto-connect behavior and displayed YAML transport metadata."
       ],
       "priority": 22,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
