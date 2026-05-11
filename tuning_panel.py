@@ -168,6 +168,7 @@ class TuningPanel(tk.Tk):
         self.plan: dict[str, Any] | None = None
         self.session: Any | None = None
         self.session_worker: SessionWorker | None = None
+        self.operator_buttons: dict[str, ttk.Button] = {}
         self.session_transport_factory = session_transport_factory
         self.run_backend = run_backend or os.environ.get("MCU_TUNING_PANEL_RUN_BACKEND", "session")
         if self.run_backend not in {"session", "subprocess"}:
@@ -336,17 +337,31 @@ class TuningPanel(tk.Tk):
         ttk.Entry(controls, textvariable=self.plan_path).grid(row=0, column=1, sticky="ew", padx=10)
         ttk.Button(controls, text="选择文件", command=self.browse_plan).grid(row=0, column=2, padx=(0, 8))
         ttk.Button(controls, text="校验", command=self.validate_current_plan).grid(row=0, column=3, padx=(0, 8))
-        ttk.Button(controls, text="启动", style="Accent.TButton", command=self.start).grid(row=0, column=4, padx=(0, 8))
-        ttk.Button(controls, text="停止", style="Danger.TButton", command=self.stop).grid(row=0, column=5, padx=(0, 8))
-        ttk.Button(controls, text="急停", style="Danger.TButton", command=self.emergency_stop).grid(row=0, column=6)
+        ttk.Button(controls, text="启动所选模式", style="Accent.TButton", command=self.start).grid(
+            row=0,
+            column=4,
+            padx=(0, 8),
+        )
+        ttk.Button(controls, text="清空日志", command=self.clear_log).grid(row=0, column=5, padx=(0, 8))
+        ttk.Button(controls, text="打开记录", command=self.open_transcript).grid(row=0, column=6)
 
         mode_frame = ttk.Frame(controls, style="Card.TFrame")
         mode_frame.grid(row=1, column=1, sticky="w", padx=8, pady=(10, 0))
         ttk.Radiobutton(mode_frame, text="演示", variable=self.mode, value="demo").pack(side="left", padx=(0, 14))
         ttk.Radiobutton(mode_frame, text="观测", variable=self.mode, value="monitor").pack(side="left", padx=(0, 14))
         ttk.Radiobutton(mode_frame, text="自动调参", variable=self.mode, value="run").pack(side="left")
-        ttk.Button(controls, text="清空日志", command=self.clear_log).grid(row=1, column=4, padx=(0, 8), pady=(12, 0))
-        ttk.Button(controls, text="打开记录", command=self.open_transcript).grid(row=1, column=5, pady=(12, 0))
+
+        operator_frame = ttk.Frame(controls, style="Card.TFrame")
+        operator_frame.grid(row=2, column=0, columnspan=7, sticky="w", pady=(12, 0))
+        self._add_operator_button(operator_frame, "start_monitor", "启动观测", self.start_monitor, "Accent.TButton")
+        self._add_operator_button(operator_frame, "start_auto_tune", "启动自动调参", self.start_auto_tune, "Accent.TButton")
+        self._add_operator_button(operator_frame, "pause", "暂停", self.pause_session)
+        self._add_operator_button(operator_frame, "resume", "恢复", self.resume_session)
+        self._add_operator_button(operator_frame, "skip_current_param", "跳过当前参数", self.skip_current_parameter)
+        self._add_operator_button(operator_frame, "rollback_last_stable", "回滚到稳定值", self.rollback_to_last_stable)
+        self._add_operator_button(operator_frame, "rollback_baseline", "回滚到基线", self.rollback_to_baseline)
+        self._add_operator_button(operator_frame, "stop", "停止", self.stop, "Danger.TButton")
+        self._add_operator_button(operator_frame, "emergency_stop", "急停", self.emergency_stop, "Danger.TButton")
 
         self.notebook = ttk.Notebook(main)
         self.notebook.grid(row=1, column=0, sticky="nsew")
@@ -361,6 +376,19 @@ class TuningPanel(tk.Tk):
         footer.pack(fill="x")
         ttk.Label(footer, text="记录文件:", style="Footer.TLabel").pack(side="left")
         ttk.Label(footer, textvariable=self.transcript_path, style="FooterValue.TLabel").pack(side="left", padx=(6, 0))
+        self._refresh_operator_controls()
+
+    def _add_operator_button(
+        self,
+        parent: ttk.Frame,
+        name: str,
+        text: str,
+        command: Callable[[], Any],
+        style: str | None = None,
+    ) -> None:
+        button = ttk.Button(parent, text=text, command=command, style=style)
+        button.pack(side="left", padx=(0, 8))
+        self.operator_buttons[name] = button
 
     def _build_overview_page(self) -> None:
         page = ttk.Frame(self.notebook, padding=14)
@@ -759,6 +787,7 @@ class TuningPanel(tk.Tk):
         for index, (label, value) in enumerate(rows):
             tag = "evenrow" if index % 2 == 0 else "oddrow"
             self.tuning_tree.insert("", "end", text=label, values=(value,), tags=(tag,))
+        self._refresh_operator_controls()
 
     def _add_history_event(self, kind: str, detail: str) -> None:
         compact_detail = detail.strip()
@@ -802,6 +831,46 @@ class TuningPanel(tk.Tk):
 
     def _task_running(self) -> bool:
         return self.proc is not None or (self.session_worker is not None and self.session_worker.is_alive())
+
+    def _session_state(self) -> str:
+        state = getattr(self.session, "state", "")
+        return str(state) if state is not None else ""
+
+    def _set_operator_button_enabled(self, name: str, enabled: bool) -> None:
+        button = self.operator_buttons.get(name)
+        if button is None:
+            return
+        button.configure(state="normal" if enabled else "disabled")
+
+    def _refresh_operator_controls(self) -> None:
+        if not self.operator_buttons:
+            return
+        running = self._task_running()
+        session_running = self.session_worker is not None and self.session_worker.is_alive()
+        state = self._session_state()
+        terminal_state = state in {"stopping", "stopped", "error"}
+        can_start = not running
+        can_control_session = session_running and not terminal_state
+        current_key = getattr(self.session, "current_parameter_key", None)
+        baseline = getattr(self.session, "baseline_parameters", None)
+
+        self._set_operator_button_enabled("start_monitor", can_start)
+        self._set_operator_button_enabled("start_auto_tune", can_start)
+        self._set_operator_button_enabled("pause", can_control_session and state != "paused")
+        self._set_operator_button_enabled("resume", session_running and state == "paused")
+        self._set_operator_button_enabled("skip_current_param", can_control_session and current_key is not None)
+        self._set_operator_button_enabled("rollback_last_stable", can_control_session and baseline is not None)
+        self._set_operator_button_enabled("rollback_baseline", can_control_session and baseline is not None)
+        self._set_operator_button_enabled("stop", running and state not in {"stopped", "error"})
+        self._set_operator_button_enabled("emergency_stop", running and state not in {"stopped", "error"})
+
+    def start_monitor(self) -> None:
+        self.mode.set("monitor")
+        self.start()
+
+    def start_auto_tune(self) -> None:
+        self.mode.set("run")
+        self.start()
 
     def start(self) -> None:
         if self._task_running():
@@ -1215,6 +1284,46 @@ class TuningPanel(tk.Tk):
         if self.transcript_handle is not None:
             self.transcript_handle.close()
             self.transcript_handle = None
+
+    def _dispatch_session_control(self, method_name: str, label: str, *args: Any, **kwargs: Any) -> Any:
+        if self.session is None or not hasattr(self.session, method_name):
+            self._add_history_event("错误", f"{label}: 当前没有可控 TuningSession")
+            self._refresh_tuning_tree()
+            return None
+        method = getattr(self.session, method_name)
+        result = method(*args, **kwargs)
+        ok = bool(getattr(result, "ok", True))
+        message = str(getattr(result, "message", "") or method_name)
+        state = getattr(result, "state", None)
+        if state is not None:
+            self.status.set(str(state))
+        if ok:
+            self._add_history_event("动作", f"{label}: {message}")
+        else:
+            error_code = getattr(result, "error_code", None)
+            if error_code is None:
+                data = getattr(result, "data", {})
+                if isinstance(data, dict):
+                    error_code = data.get("error_code") or data.get("code")
+            detail = f"{label}: {error_code or message}"
+            self._add_history_event("错误", detail)
+        self._refresh_tuning_tree()
+        return result
+
+    def pause_session(self) -> Any:
+        return self._dispatch_session_control("pause", "暂停")
+
+    def resume_session(self) -> Any:
+        return self._dispatch_session_control("resume", "恢复")
+
+    def skip_current_parameter(self) -> Any:
+        return self._dispatch_session_control("skip_current_param", "跳过当前参数", reason="gui_operator")
+
+    def rollback_to_last_stable(self) -> Any:
+        return self._dispatch_session_control("rollback_to", "回滚到稳定值", "last_stable")
+
+    def rollback_to_baseline(self) -> Any:
+        return self._dispatch_session_control("rollback_to", "回滚到基线", "baseline")
 
     def stop(self) -> None:
         self.stop_requested = True

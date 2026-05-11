@@ -338,7 +338,7 @@
         "Tests pass for state-based button enablement and control API dispatch using a fake session."
       ],
       "priority": 21,
-      "passes": false,
+      "passes": true,
       "notes": ""
     },
     {
